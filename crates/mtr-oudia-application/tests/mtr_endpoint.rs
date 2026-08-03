@@ -1,0 +1,34 @@
+use mtr_oudia_application::{ApplicationError, MtrEndpoint};
+
+#[test]
+fn loopback_endpoints_build_the_fixed_api_url() {
+    let ipv4 = MtrEndpoint::parse("http://127.12.34.56:49182/").unwrap();
+    let ipv6 = MtrEndpoint::parse("http://[::1]:49182").unwrap();
+
+    assert_eq!(
+        ipv4.stations_and_routes_url(7).as_str(),
+        "http://127.12.34.56:49182/mtr/api/map/stations-and-routes?dimension=7"
+    );
+    assert_eq!(
+        ipv6.stations_and_routes_url(0).as_str(),
+        "http://[::1]:49182/mtr/api/map/stations-and-routes?dimension=0"
+    );
+}
+
+#[test]
+fn endpoint_rejects_non_loopback_or_unsafe_url_parts() {
+    for input in [
+        "http://example.test:8080/",
+        "http://localhost:8080/",
+        "https://127.0.0.1:8080/",
+        "http://user@127.0.0.1:8080/",
+        "http://127.0.0.1:8080/other",
+        "http://127.0.0.1:8080/?dimension=1",
+        "http://127.0.0.1:8080/#part",
+    ] {
+        assert!(matches!(
+            MtrEndpoint::parse(input),
+            Err(ApplicationError::InvalidEndpoint { .. })
+        ));
+    }
+}

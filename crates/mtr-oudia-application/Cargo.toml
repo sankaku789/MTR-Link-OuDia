@@ -3,4 +3,7 @@ name = "mtr-oudia-application"
 version.workspace = true
 edition.workspace = true
 [dependencies]
+async-trait = "0.1"
 mtr-oudia-domain = { path = "../mtr-oudia-domain" }
+serde_json = "1"
+url = "2"

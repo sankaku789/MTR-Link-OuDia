@@ -1,0 +1,23 @@
+{
+  "status": 200,
+  "text": "OK",
+  "currentTime": 1715000000000,
+  "data": {
+    "stations": [
+      { "id": "station-a", "name": "Central Station" },
+      { "id": "station-b", "name": "West Station" }
+    ],
+    "routes": [
+      {
+        "id": "route-1",
+        "name": "Blue Line",
+        "stations": [
+          { "id": "station-a", "name": "Platform 1", "dwellTime": 0 },
+          { "id": "station-b", "name": "Platform 2", "dwellTime": 5000 }
+        ],
+        "durations": [12345]
+      }
+    ],
+    "dimensions": [{ "id": 0, "name": "overworld" }]
+  }
+}
