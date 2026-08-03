@@ -3,6 +3,10 @@
 use std::error::Error;
 use std::fmt;
 
+pub mod oudia;
+
+pub use oudia::*;
+
 /// Domain 層で検出した不正な値や演算結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DomainError {
@@ -28,6 +32,18 @@ pub enum DomainError {
     InvalidValue { value_name: &'static str },
     /// MTR 路線の駅列または運転時分が整合していない。
     InvalidRoute { reason: &'static str },
+    /// 入力の文字コードは正式対応外である。
+    UnsupportedEncoding { encoding: &'static str },
+    /// 入力を厳格に文字列へ変換できない。
+    DecodeError { encoding: &'static str },
+    /// LF と CRLF が混在している。
+    MixedLineEnding,
+    /// 正式対応外の OuDia FileType が指定された。
+    UnsupportedFileType { file_type: String },
+    /// OuDia のセクション構造が破損している。
+    InvalidOudiaStructure { reason: &'static str },
+    /// 書換え安全性を確認できない EkiJikoku セルが存在する。
+    UnknownEkiJikoku { raw: String },
 }
 
 impl fmt::Display for DomainError {
@@ -56,6 +72,22 @@ impl fmt::Display for DomainError {
             ),
             Self::InvalidValue { value_name } => write!(formatter, "{value_name} が不正です"),
             Self::InvalidRoute { reason } => write!(formatter, "不正な路線データです: {reason}"),
+            Self::UnsupportedEncoding { encoding } => {
+                write!(formatter, "未対応の文字コードです: {encoding}")
+            }
+            Self::DecodeError { encoding } => {
+                write!(formatter, "{encoding} として厳格に復号できません")
+            }
+            Self::MixedLineEnding => formatter.write_str("改行コードが混在しています"),
+            Self::UnsupportedFileType { file_type } => {
+                write!(formatter, "未対応の FileType です: {file_type}")
+            }
+            Self::InvalidOudiaStructure { reason } => {
+                write!(formatter, "不正な OuDia 構造です: {reason}")
+            }
+            Self::UnknownEkiJikoku { raw } => {
+                write!(formatter, "安全に解析できない EkiJikoku です: {raw}")
+            }
         }
     }
 }

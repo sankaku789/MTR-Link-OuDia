@@ -2,3 +2,6 @@
 name = "mtr-oudia-domain"
 version.workspace = true
 edition.workspace = true
+
+[dependencies]
+encoding_rs = "0.8"
