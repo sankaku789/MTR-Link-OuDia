@@ -4,10 +4,12 @@ use std::error::Error;
 use std::fmt;
 
 pub mod oudia;
+pub mod patch;
 pub mod route_matching;
 pub mod timetable;
 
 pub use oudia::*;
+pub use patch::*;
 pub use route_matching::*;
 pub use timetable::*;
 
