@@ -1,6 +1,13 @@
-use mtr_oudia_application::{ApplicationError, MtrApiClient, MtrEndpoint};
-use mtr_oudia_infrastructure::{ReqwestMtrApiClient, parse_mtr_response};
+use mtr_oudia_application::MtrEndpoint;
+use mtr_oudia_infrastructure::parse_mtr_response;
+
+#[cfg(not(windows))]
+use mtr_oudia_application::{ApplicationError, MtrApiClient};
+#[cfg(not(windows))]
+use mtr_oudia_infrastructure::ReqwestMtrApiClient;
+#[cfg(not(windows))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(not(windows))]
 use tokio::net::TcpListener;
 
 #[test]
@@ -25,6 +32,7 @@ fn parser_normalizes_station_and_platform_names_with_a_fixed_retrieval_time() {
     assert_eq!(route.stops[1].run_millis_to_next, None);
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn http_client_does_not_follow_redirects() {
     let endpoint = test_server(
@@ -40,6 +48,7 @@ async fn http_client_does_not_follow_redirects() {
     ));
 }
 
+#[cfg(not(windows))]
 #[tokio::test]
 async fn http_client_rejects_a_declared_oversized_response() {
     let endpoint =
@@ -52,6 +61,7 @@ async fn http_client_rejects_a_declared_oversized_response() {
     );
 }
 
+#[cfg(not(windows))]
 async fn test_server(response: String) -> MtrEndpoint {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
