@@ -2,6 +2,8 @@
 
 use futures_util::StreamExt;
 use mtr_oudia_application::DomainPort;
+#[cfg(not(target_os = "windows"))]
+use mtr_oudia_application::ListeningPortProvider;
 use mtr_oudia_application::{
     ApplicationError, MtrApiClient, MtrEndpoint, MtrSnapshotResponse, async_trait,
 };
@@ -15,6 +17,19 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
 const RESPONSE_TIMEOUT: Duration = Duration::from_millis(1_500);
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+#[cfg(target_os = "windows")]
+mod windows;
+
+/// Windows IP Helper API で待受ポートを得る Provider。
+pub struct WindowsListeningPortProvider;
+
+#[cfg(not(target_os = "windows"))]
+impl ListeningPortProvider for WindowsListeningPortProvider {
+    fn listening_tcp_ports(&self) -> Result<Vec<u16>, ApplicationError> {
+        Err(ApplicationError::ListeningPortProviderUnsupported)
+    }
+}
 
 /// P01 の Application Port 実装。
 pub struct StaticDomainPort;

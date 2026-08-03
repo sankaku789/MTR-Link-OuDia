@@ -2003,8 +2003,10 @@ name = "mtr-oudia-application"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "mtr-oudia-domain",
  "serde_json",
+ "tokio",
  "url",
 ]
 
@@ -2026,6 +2028,7 @@ dependencies = [
  "reqwest",
  "serde_json",
  "tokio",
+ "windows",
 ]
 
 [[package]]
