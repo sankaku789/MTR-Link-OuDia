@@ -25,8 +25,9 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. Rust writes and locks DLLs under `target` while Tauri is compiling.
+      // Watching them can make Node's Windows watcher fail with EBUSY.
+      ignored: ["**/src-tauri/**", "**/target/**"],
     },
   },
 }));

@@ -1,0 +1,4 @@
+src/routes/+page.svelte
+Error processing request textDocument/documentSymbol with params:
+{'textDocument': {'uri': 'file:///mnt/c/Users/kousu/Documents/Projects/mtr-link-oudia/src/routes/%2Bpage.svelte'}}
+(caused by LanguageServerTerminatedException: Language server stdout read process terminated unexpectedly)
