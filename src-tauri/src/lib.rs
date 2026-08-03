@@ -2,8 +2,9 @@ use std::path::Path;
 
 use mtr_oudia_application::{
     BusinessError, CandidateId, ConversionService, ConversionSessionStore, ManualMappingInput,
-    MtrEndpoint, OperationPolicy, PreviewId, SessionId,
+    MtrEndpoint, PreviewId, SessionId,
 };
+use mtr_oudia_domain::OperationPolicy;
 use mtr_oudia_infrastructure::{
     FileOudiaRepository, JsonSettingsRepository, ReqwestMtrApiClient, SafeOudiaWriter,
     WindowsListeningPortProvider,
@@ -122,7 +123,7 @@ pub struct SaveRequest {
 }
 
 #[tauri::command]
-pub async fn detect_mtr_endpoints(
+async fn detect_mtr_endpoints(
     state: tauri::State<'_, AppState>,
     input: SessionRequest,
 ) -> Result<(String, Vec<mtr_oudia_application::EndpointDto>), ErrorDto> {
@@ -132,7 +133,7 @@ pub async fn detect_mtr_endpoints(
 }
 
 #[tauri::command]
-pub async fn fetch_mtr_snapshot(
+async fn fetch_mtr_snapshot(
     state: tauri::State<'_, AppState>,
     input: SnapshotRequest,
 ) -> Result<mtr_oudia_application::SnapshotDto, ErrorDto> {
@@ -149,7 +150,7 @@ pub async fn fetch_mtr_snapshot(
 }
 
 #[tauri::command]
-pub fn inspect_oudia(
+fn inspect_oudia(
     state: tauri::State<'_, AppState>,
     input: OudiaRequest,
 ) -> Result<mtr_oudia_application::InspectionDto, ErrorDto> {
@@ -160,7 +161,7 @@ pub fn inspect_oudia(
 }
 
 #[tauri::command]
-pub fn find_route_candidates(
+fn find_route_candidates(
     state: tauri::State<'_, AppState>,
     input: CandidatesRequest,
 ) -> Result<Vec<mtr_oudia_application::RouteCandidateDto>, ErrorDto> {
@@ -176,7 +177,7 @@ pub fn find_route_candidates(
 }
 
 #[tauri::command]
-pub fn build_preview(
+fn build_preview(
     state: tauri::State<'_, AppState>,
     input: PreviewRequest,
 ) -> Result<mtr_oudia_application::PreviewDto, ErrorDto> {
@@ -191,7 +192,7 @@ pub fn build_preview(
 }
 
 #[tauri::command]
-pub fn save_conversion(
+fn save_conversion(
     state: tauri::State<'_, AppState>,
     input: SaveRequest,
 ) -> Result<mtr_oudia_application::SaveReceipt, ErrorDto> {
