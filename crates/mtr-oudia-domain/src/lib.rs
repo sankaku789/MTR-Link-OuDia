@@ -4,8 +4,10 @@ use std::error::Error;
 use std::fmt;
 
 pub mod oudia;
+pub mod timetable;
 
 pub use oudia::*;
+pub use timetable::*;
 
 /// Domain 層で検出した不正な値や演算結果。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +34,8 @@ pub enum DomainError {
     InvalidValue { value_name: &'static str },
     /// MTR 路線の駅列または運転時分が整合していない。
     InvalidRoute { reason: &'static str },
+    /// 時刻表生成に必要な駅数または時分数が不正である。
+    InvalidTimetable { reason: &'static str },
     /// 入力の文字コードは正式対応外である。
     UnsupportedEncoding { encoding: &'static str },
     /// 入力を厳格に文字列へ変換できない。
@@ -72,6 +76,7 @@ impl fmt::Display for DomainError {
             ),
             Self::InvalidValue { value_name } => write!(formatter, "{value_name} が不正です"),
             Self::InvalidRoute { reason } => write!(formatter, "不正な路線データです: {reason}"),
+            Self::InvalidTimetable { reason } => write!(formatter, "不正な時刻表です: {reason}"),
             Self::UnsupportedEncoding { encoding } => {
                 write!(formatter, "未対応の文字コードです: {encoding}")
             }
@@ -99,6 +104,9 @@ impl Error for DomainError {}
 pub struct ServiceTimeMillis(i64);
 
 impl ServiceTimeMillis {
+    /// 基準始発駅の固定発時刻（10:00:00）。
+    pub const TEN_OCLOCK: Self = Self(36_000_000);
+
     /// 非負のミリ秒からサービス時刻を作成する。
     pub fn new(millis: i64) -> Result<Self, DomainError> {
         if millis < 0 {
@@ -118,6 +126,14 @@ impl ServiceTimeMillis {
         self.0
             .checked_add(other.0)
             .map(Self)
+            .ok_or(DomainError::TimeOverflow)
+    }
+
+    /// OuDia 表示直前に秒へ half-up 丸めする。
+    pub fn rounded_seconds(self) -> Result<i64, DomainError> {
+        self.0
+            .checked_add(500)
+            .map(|millis| millis / 1_000)
             .ok_or(DomainError::TimeOverflow)
     }
 }
