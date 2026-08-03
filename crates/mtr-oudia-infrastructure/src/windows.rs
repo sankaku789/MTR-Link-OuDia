@@ -88,7 +88,12 @@ fn parse_listening_tcp_table(buffer: &[u8], ipv6: bool) -> Result<Vec<u16>, Appl
 
     let mut ports = BTreeSet::new();
     for row in buffer[4..required].chunks_exact(row_size) {
-        let state = u32::from_ne_bytes(row[..4].try_into().expect("state field"));
+        let state_offset = if ipv6 { 48 } else { 0 };
+        let state = u32::from_ne_bytes(
+            row[state_offset..state_offset + 4]
+                .try_into()
+                .expect("state field"),
+        );
         if state != TCP_LISTEN || !is_loopback_reachable(row, ipv6) {
             continue;
         }
