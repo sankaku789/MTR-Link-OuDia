@@ -191,16 +191,29 @@ pub struct EndpointDto {
 pub struct SnapshotDto {
     pub routes: Vec<RouteDto>,
     pub dimensions: Vec<serde_json::Value>,
+    pub api_current_time_millis: i64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteDto {
     pub id: String,
     pub name: String,
-    pub stations: Vec<String>,
+    pub stations: Vec<RouteStationDto>,
+    pub station_count: usize,
+    pub total_run_millis: i64,
+    pub total_dwell_millis: i64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteStationDto {
+    pub station_name: String,
+    pub platform_name: String,
+    pub dwell_millis: i64,
+    pub run_millis_to_next: Option<i64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InspectionDto {
     pub file_type: String,
+    pub line_name: Option<String>,
+    pub station_count: usize,
     pub kijun_status: String,
     pub diagrams: Vec<DiagramDto>,
     pub train_types: Vec<usize>,
@@ -217,15 +230,26 @@ pub struct TemplateDto {
     pub direction: String,
     pub train_index: usize,
     pub train_type_index: Option<usize>,
+    pub active_station_slots: Vec<StationSlotDto>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StationSlotDto {
+    pub index: usize,
+    pub name: String,
+    pub previous_name: Option<String>,
+    pub next_name: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteCandidateDto {
     pub id: CandidateId,
+    pub diagram_index: usize,
+    pub train_index: usize,
     pub direction: String,
     pub station_mappings: Vec<StationMappingDto>,
     pub rank: String,
     pub reasons: Vec<String>,
     pub auto_selected: bool,
+    pub manual_only: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StationMappingDto {
@@ -471,7 +495,7 @@ impl<
             .await
             .map_err(map_application_error)?;
         self.settings.save_last_successful_endpoint(endpoint)?;
-        let dto = snapshot_dto(&response);
+        let dto = snapshot_dto(&response)?;
         self.store.update(id, |s| {
             invalidate(s);
             s.endpoint = Some(endpoint.clone());
@@ -574,6 +598,32 @@ impl<
                     },
                 );
                 result.push(candidate_dto(cid, candidate, mapping, auto_selected));
+            }
+            if result.is_empty() {
+                // 自動照合が不成立でも、既存列車を指定して手動駅対応を安全に確定できる。
+                for template in templates {
+                    let cid =
+                        CandidateId(format!("candidate-{}-{}", s.revision, s.candidates.len()));
+                    s.candidates.insert(
+                        cid.clone(),
+                        Candidate {
+                            revision: s.revision,
+                            template: template.clone(),
+                            mapping: Vec::new(),
+                        },
+                    );
+                    result.push(RouteCandidateDto {
+                        id: cid,
+                        diagram_index: template.diagram_index,
+                        train_index: template.train_index,
+                        direction: direction(template.direction).into(),
+                        station_mappings: Vec::new(),
+                        rank: "manual".into(),
+                        reasons: vec!["自動照合候補なし".into()],
+                        auto_selected: false,
+                        manual_only: true,
+                    });
+                }
             }
             Ok(result)
         })
@@ -746,20 +796,59 @@ fn templates_for(
         }
     }
 }
-fn snapshot_dto(response: &MtrSnapshotResponse) -> SnapshotDto {
-    SnapshotDto {
+fn snapshot_dto(response: &MtrSnapshotResponse) -> Result<SnapshotDto, BusinessError> {
+    Ok(SnapshotDto {
         routes: response
             .snapshot
             .routes
             .iter()
-            .map(|r| RouteDto {
-                id: r.route_id.clone(),
-                name: r.display_name.clone(),
-                stations: r.stops.iter().map(|v| v.station_name.clone()).collect(),
+            .map(|r| {
+                let total_run_millis = r
+                    .stops
+                    .iter()
+                    .try_fold(0_i64, |total, stop| {
+                        total.checked_add(stop.run_millis_to_next.map_or(0, |value| value.millis()))
+                    })
+                    .ok_or_else(|| {
+                        BusinessError::new(
+                            BusinessErrorKind::Internal,
+                            "運転時分の合計が範囲外です",
+                        )
+                    })?;
+                let total_dwell_millis = r
+                    .stops
+                    .iter()
+                    .try_fold(0_i64, |total, stop| {
+                        total.checked_add(stop.dwell_millis.millis())
+                    })
+                    .ok_or_else(|| {
+                        BusinessError::new(
+                            BusinessErrorKind::Internal,
+                            "停車時分の合計が範囲外です",
+                        )
+                    })?;
+                Ok(RouteDto {
+                    id: r.route_id.clone(),
+                    name: r.display_name.clone(),
+                    station_count: r.stops.len(),
+                    total_run_millis,
+                    total_dwell_millis,
+                    stations: r
+                        .stops
+                        .iter()
+                        .map(|stop| RouteStationDto {
+                            station_name: stop.station_name.clone(),
+                            platform_name: stop.platform_name.clone(),
+                            dwell_millis: stop.dwell_millis.millis(),
+                            run_millis_to_next: stop.run_millis_to_next.map(|value| value.millis()),
+                        })
+                        .collect(),
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>, BusinessError>>()?,
         dimensions: response.available_dimensions.clone(),
-    }
+        api_current_time_millis: response.snapshot.api_current_time_millis,
+    })
 }
 fn inspection_dto(source: &OudiaSource) -> InspectionDto {
     let templates = match build_oudia_route_templates(&source.document) {
@@ -768,6 +857,13 @@ fn inspection_dto(source: &OudiaSource) -> InspectionDto {
     };
     InspectionDto {
         file_type: source.document.file_type.clone(),
+        line_name: source
+            .document
+            .properties
+            .iter()
+            .find(|property| property.key == "Rosenmei")
+            .map(|property| property.value.clone()),
+        station_count: source.document.station_slots.len(),
         kijun_status: match source.document.kijun_dia_index {
             KijunDiaIndex::Valid(_) => "valid",
             KijunDiaIndex::Missing => "missing",
@@ -798,6 +894,11 @@ fn inspection_dto(source: &OudiaSource) -> InspectionDto {
                 direction: direction(t.direction).into(),
                 train_index: t.train_index,
                 train_type_index: t.train_type_index,
+                active_station_slots: t
+                    .active_station_slots
+                    .iter()
+                    .map(|&index| station_slot_dto(&source.document.station_slots, index))
+                    .collect(),
             })
             .collect(),
     }
@@ -810,6 +911,8 @@ fn candidate_dto(
 ) -> RouteCandidateDto {
     RouteCandidateDto {
         id,
+        diagram_index: c.id.diagram_index,
+        train_index: c.id.train_index,
         direction: direction(c.direction).into(),
         station_mappings: mapping,
         rank: format!("{:?}", c.rank),
@@ -819,6 +922,21 @@ fn candidate_dto(
             .map(|v| format!("{:?}", v))
             .collect(),
         auto_selected,
+        manual_only: false,
+    }
+}
+fn station_slot_dto(slots: &[mtr_oudia_domain::OudiaStationSlot], index: usize) -> StationSlotDto {
+    StationSlotDto {
+        index,
+        name: slots
+            .get(index)
+            .map(|slot| slot.name.clone())
+            .unwrap_or_default(),
+        previous_name: index
+            .checked_sub(1)
+            .and_then(|previous| slots.get(previous))
+            .map(|slot| slot.name.clone()),
+        next_name: slots.get(index + 1).map(|slot| slot.name.clone()),
     }
 }
 fn preview_dto(
@@ -1005,7 +1123,7 @@ impl<'a, C: MtrApiClient + ?Sized, S: SettingsRepository + ?Sized> FetchMtrSnaps
             .await
             .map_err(map_application_error)?;
         self.settings.save_last_successful_endpoint(endpoint)?;
-        Ok(snapshot_dto(&response))
+        snapshot_dto(&response)
     }
 }
 

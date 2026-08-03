@@ -252,11 +252,19 @@ mod tests {
     }
 
     #[test]
-    fn command_requests_accept_only_identifiers_and_paths() {
-        let json =
-            serde_json::to_string(&serde_json::json!({"sessionId":"s","candidateId":"c"})).unwrap();
+    fn preview_request_accepts_index_mapping_without_patch_data() {
+        let json = serde_json::to_string(&serde_json::json!({
+            "sessionId":"s", "candidateId":"c",
+            "manualMappings":{"station_mappings":[{"mtr_station_index":0,"oudia_station_slot":3}]}
+        }))
+        .unwrap();
         let request: PreviewRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(request.session_id, "s");
         assert_eq!(request.candidate_id, "c");
+        assert_eq!(
+            request.manual_mappings.unwrap().station_mappings[0].oudia_station_slot,
+            3
+        );
+        assert!(!json.contains("sourceRange") && !json.contains("patch") && !json.contains("time"));
     }
 }

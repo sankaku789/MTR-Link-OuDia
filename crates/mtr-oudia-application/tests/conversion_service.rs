@@ -10,6 +10,100 @@ use mtr_oudia_domain::{
 use std::{collections::BTreeMap, path::Path, sync::Mutex};
 
 const OUDIA: &str = "FileType=OuDiaSecond.1.16\nKijunDiaIndex=0\nRosen.\nEki.\nEkimei=A\n.\nEki.\nEkimei=B\n.\n.\nDia.\nKudari.\nRessya.\nRessyasyubetsu=1\nEkiJikoku=1;/10:00:00,1;10:01:00/\n.\n.\n.\n";
+
+#[tokio::test]
+async fn display_dtos_include_normalized_route_and_oudia_metadata() {
+    let ports = Ports {
+        saved: Mutex::new(Vec::new()),
+    };
+    let service = ConversionService::new(
+        ConversionSessionStore::new(2),
+        &ports,
+        &ports,
+        &ports,
+        &ports,
+        &ports,
+    );
+    let session = service.create_session();
+    let endpoint = MtrEndpoint::parse("http://127.0.0.1:12345/").unwrap();
+
+    let snapshot = service
+        .fetch_mtr_snapshot(&session, &endpoint, 0)
+        .await
+        .unwrap();
+    assert_eq!(snapshot.api_current_time_millis, 0);
+    assert_eq!(snapshot.routes[0].station_count, 2);
+    assert_eq!(snapshot.routes[0].total_run_millis, 1_000);
+    assert_eq!(snapshot.routes[0].stations[0].station_name, "A");
+    assert_eq!(
+        snapshot.routes[0].stations[0].run_millis_to_next,
+        Some(1_000)
+    );
+    assert_eq!(
+        serde_json::to_value(&snapshot).unwrap()["api_current_time_millis"],
+        0
+    );
+
+    let inspection = service
+        .inspect_oudia(&session, Path::new("input.oud2"))
+        .unwrap();
+    assert_eq!(inspection.line_name, None);
+    assert_eq!(inspection.station_count, 2);
+    assert_eq!(inspection.templates[0].active_station_slots[0].name, "A");
+    assert_eq!(
+        serde_json::to_value(&inspection).unwrap()["station_count"],
+        2
+    );
+}
+
+#[tokio::test]
+async fn manual_template_remains_selectable_when_automatic_matching_has_no_candidate() {
+    let ports = Ports {
+        saved: Mutex::new(Vec::new()),
+    };
+    let no_match = NoMatchRepository;
+    let service = ConversionService::new(
+        ConversionSessionStore::new(2),
+        &ports,
+        &ports,
+        &no_match,
+        &ports,
+        &ports,
+    );
+    let session = service.create_session();
+    let endpoint = MtrEndpoint::parse("http://127.0.0.1:12345/").unwrap();
+    service
+        .fetch_mtr_snapshot(&session, &endpoint, 0)
+        .await
+        .unwrap();
+    service
+        .inspect_oudia(&session, Path::new("input.oud2"))
+        .unwrap();
+
+    let candidates = service
+        .find_route_candidates(&session, "route", None, Some(1))
+        .unwrap();
+    assert!(candidates.iter().all(|candidate| candidate.manual_only));
+    let preview = service
+        .build_preview(
+            &session,
+            Some(&candidates[0].id),
+            Some(mtr_oudia_application::ManualMappingInput {
+                station_mappings: vec![
+                    mtr_oudia_application::StationMappingDto {
+                        mtr_station_index: 0,
+                        oudia_station_slot: 0,
+                    },
+                    mtr_oudia_application::StationMappingDto {
+                        mtr_station_index: 1,
+                        oudia_station_slot: 1,
+                    },
+                ],
+            }),
+        )
+        .unwrap();
+    assert_eq!(preview.stops.len(), 2);
+}
 struct Ports {
     saved: Mutex<Vec<String>>,
 }
@@ -46,6 +140,18 @@ impl MtrApiClient for Ports {
 impl OudiaRepository for Ports {
     fn read(&self, _: &Path) -> Result<mtr_oudia_domain::OudiaSource, BusinessError> {
         Ok(parse_oudia(OUDIA.as_bytes().to_vec()).unwrap())
+    }
+}
+struct NoMatchRepository;
+impl OudiaRepository for NoMatchRepository {
+    fn read(&self, _: &Path) -> Result<mtr_oudia_domain::OudiaSource, BusinessError> {
+        Ok(parse_oudia(
+            OUDIA
+                .replace("Ekimei=A", "Ekimei=X")
+                .replace("Ekimei=B", "Ekimei=Y")
+                .into_bytes(),
+        )
+        .unwrap())
     }
 }
 impl SettingsRepository for Ports {

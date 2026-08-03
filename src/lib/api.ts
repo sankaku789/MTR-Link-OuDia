@@ -2,16 +2,18 @@ import { invoke } from '@tauri-apps/api/core';
 
 export type ErrorDto = { kind: string; message: string; detail?: string };
 export type Endpoint = { url: string };
-export type Route = { id: string; name: string; stations: string[] };
-export type Snapshot = { routes: Route[]; dimensions: unknown[] };
+export type RouteStation = { station_name: string; platform_name: string; dwell_millis: number; run_millis_to_next?: number };
+export type Route = { id: string; name: string; stations: RouteStation[]; station_count: number; total_run_millis: number; total_dwell_millis: number };
+export type Snapshot = { routes: Route[]; dimensions: unknown[]; api_current_time_millis: number };
 export type Inspection = {
-  file_type: string; kijun_status: string;
+  file_type: string; line_name?: string; station_count: number; kijun_status: string;
   diagrams: { index: number; train_count: number }[];
   train_types: number[];
-  templates: { diagram_index: number; direction: string; train_index: number; train_type_index?: number }[];
+  templates: { diagram_index: number; direction: string; train_index: number; train_type_index?: number; active_station_slots: StationSlot[] }[];
 };
+export type StationSlot = { index: number; name: string; previous_name?: string; next_name?: string };
 export type Candidate = {
-  id: string; direction: string; rank: string; reasons: string[]; auto_selected: boolean;
+  id: string; diagram_index: number; train_index: number; direction: string; rank: string; reasons: string[]; auto_selected: boolean; manual_only: boolean;
   station_mappings: { mtr_station_index: number; oudia_station_slot: number }[];
 };
 export type Preview = {
@@ -43,8 +45,8 @@ export const api = {
   inspect: (sessionId: string, path: string) => call<Inspection>('inspect_oudia', { sessionId, path }),
   candidates: (sessionId: string, routeId: string, diagramIndex?: number, trainType?: number) =>
     call<Candidate[]>('find_route_candidates', { sessionId, routeId, diagramIndex, trainType }),
-  preview: (sessionId: string, candidateId: string) =>
-    call<Preview>('build_preview', { sessionId, candidateId }),
+  preview: (sessionId: string, candidateId: string, manualMappings?: { mtr_station_index: number; oudia_station_slot: number }[]) =>
+    call<Preview>('build_preview', { sessionId, candidateId, manualMappings: manualMappings ? { station_mappings: manualMappings } : undefined }),
   save: (sessionId: string, previewId: string, outputPath: string, policy: string) =>
     call<SaveReceipt>('save_conversion', { sessionId, previewId, outputPath, policy })
 };
