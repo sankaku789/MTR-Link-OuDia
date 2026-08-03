@@ -37,6 +37,8 @@ impl ReqwestMtrApiClient {
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(RESPONSE_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
+            // localhost API を環境・OSの HTTP proxy に転送しない。
+            .no_proxy()
             .build()
             .map_err(|error| ApplicationError::Transport {
                 message: error.to_string(),
