@@ -1,102 +1,72 @@
 //! Domain のユースケース境界と Port を置く Application 層。
 
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+};
+
 use futures_util::{StreamExt, stream};
-use mtr_oudia_domain::DomainLayer;
-use mtr_oudia_domain::MtrNetworkSnapshot;
-use std::error::Error;
-use std::fmt;
+use mtr_oudia_domain::{
+    GeneratedTimetable, KijunDiaIndex, MtrNetworkSnapshot, MtrRouteSnapshot, OperationPolicy,
+    OudiaDirection, OudiaPatch, OudiaRouteTemplate, OudiaSource, ReferenceDiagramSelection,
+    RouteMatchCandidate, RouteMatchOutcome, build_eki_jikoku_patch, build_oudia_route_templates,
+    generate_timetable, match_mtr_route,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
 pub use async_trait::async_trait;
 
-/// GUI が接続失敗の種類を表示するための Application 境界のエラー。
+/// P01 から維持する依存方向確認用の最小 Port。
+pub trait DomainPort {
+    fn domain_layer(&self) -> mtr_oudia_domain::DomainLayer;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplicationError {
-    /// localhost 以外など、許可されない手動接続先である。
     InvalidEndpoint { reason: &'static str },
-    /// 接続または応答が制限時間内に完了しなかった。
     Timeout,
-    /// HTTP 通信自体に失敗した。
     Transport { message: String },
-    /// 応答本文が許可サイズを超えた。
     ResponseTooLarge,
-    /// MTR API として必要な構造または値を満たさない。
     InvalidResponse { reason: String },
-    /// OS の待受 TCP ポートを列挙できなかった。
     ListeningPortEnumeration { message: String },
-    /// 現在の OS では待受 TCP ポート列挙を提供していない。
     ListeningPortProviderUnsupported,
 }
-
-impl fmt::Display for ApplicationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidEndpoint { reason } => {
-                write!(formatter, "許可されない API 接続先です: {reason}")
-            }
-            Self::Timeout => formatter.write_str("MTR API の応答がタイムアウトしました"),
-            Self::Transport { message } => {
-                write!(formatter, "MTR API への接続に失敗しました: {message}")
-            }
-            Self::ResponseTooLarge => formatter.write_str("MTR API の応答が大きすぎます"),
-            Self::InvalidResponse { reason } => {
-                write!(formatter, "MTR API の応答が不正です: {reason}")
-            }
-            Self::ListeningPortEnumeration { message } => {
-                write!(formatter, "待受 TCP ポートを列挙できません: {message}")
-            }
-            Self::ListeningPortProviderUnsupported => {
-                formatter.write_str("この OS では待受 TCP ポート列挙を利用できません")
-            }
-        }
+impl std::fmt::Display for ApplicationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MTR API の処理に失敗しました")
     }
 }
-
-impl Error for ApplicationError {}
+impl std::error::Error for ApplicationError {}
 
 /// localhost 上の MTR API のベース URL。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MtrEndpoint(Url);
-
 impl MtrEndpoint {
-    /// 手動入力を検証し、固定 API パスだけを後から組み立てられる形に正規化する。
     pub fn parse(input: &str) -> Result<Self, ApplicationError> {
         let mut url = Url::parse(input).map_err(|_| ApplicationError::InvalidEndpoint {
             reason: "URL として解析できません",
         })?;
-        if url.scheme() != "http" {
+        if url.scheme() != "http"
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+            || url.query().is_some()
+            || (!url.path().is_empty() && url.path() != "/")
+            || url.port().is_none()
+        {
             return Err(ApplicationError::InvalidEndpoint {
-                reason: "http のみ許可されます",
-            });
-        }
-        if !url.username().is_empty() || url.password().is_some() {
-            return Err(ApplicationError::InvalidEndpoint {
-                reason: "userinfo は許可されません",
-            });
-        }
-        if url.fragment().is_some() {
-            return Err(ApplicationError::InvalidEndpoint {
-                reason: "fragment は許可されません",
-            });
-        }
-        if url.query().is_some() {
-            return Err(ApplicationError::InvalidEndpoint {
-                reason: "query は許可されません",
-            });
-        }
-        if !url.path().is_empty() && url.path() != "/" {
-            return Err(ApplicationError::InvalidEndpoint {
-                reason: "path は許可されません",
-            });
-        }
-        if url.port().is_none() {
-            return Err(ApplicationError::InvalidEndpoint {
-                reason: "port が必要です",
+                reason: "許可されない URL です",
             });
         }
         match url.host() {
-            Some(Host::Ipv4(address)) if address.octets()[0] == 127 => {}
-            Some(Host::Ipv6(address)) if address.is_loopback() => {}
+            Some(Host::Ipv4(a)) if a.octets()[0] == 127 => {}
+            Some(Host::Ipv6(a)) if a.is_loopback() => {}
             _ => {
                 return Err(ApplicationError::InvalidEndpoint {
                     reason: "literal loopback address のみ許可されます",
@@ -106,115 +76,863 @@ impl MtrEndpoint {
         url.set_path("/");
         Ok(Self(url))
     }
-
-    /// dimension を含む固定 MTR API URL を URL API で構築する。
     pub fn stations_and_routes_url(&self, dimension: u32) -> Url {
-        let mut url = self.0.clone();
-        url.set_path("/mtr/api/map/stations-and-routes");
-        url.set_query(None);
-        url.query_pairs_mut()
-            .append_pair("dimension", &dimension.to_string());
-        url
+        let mut u = self.0.clone();
+        u.set_path("/mtr/api/map/stations-and-routes");
+        u.set_query(Some(&format!("dimension={dimension}")));
+        u
     }
-
-    /// 正規化済みのベース URL を返す。
     pub fn as_url(&self) -> &Url {
         &self.0
     }
 }
 
-/// API 応答から得たスナップショットと dimension 選択肢。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MtrSnapshotResponse {
     pub snapshot: MtrNetworkSnapshot,
-    /// API 固有形式を変更せず GUI へ渡す dimension 一覧。
     pub available_dimensions: Vec<serde_json::Value>,
 }
-
-/// MTR localhost API を取得する Infrastructure Port。
 #[async_trait]
 pub trait MtrApiClient: Send + Sync {
-    /// 指定 dimension の正規化済みスナップショットを取得する。
     async fn fetch_snapshot(
         &self,
         endpoint: &MtrEndpoint,
         dimension: u32,
     ) -> Result<MtrSnapshotResponse, ApplicationError>;
 }
-
-/// OS が提供する localhost 到達可能な TCP 待受ポートの列挙境界。
 pub trait ListeningPortProvider: Send + Sync {
-    /// port 0 を含まない、重複しない待受 TCP ポートを返す。
     fn listening_tcp_ports(&self) -> Result<Vec<u16>, ApplicationError>;
 }
+pub trait OudiaRepository: Send + Sync {
+    fn read(&self, location: &Path) -> Result<OudiaSource, BusinessError>;
+}
+pub trait ValidatedSavePort: Send + Sync {
+    fn save(
+        &self,
+        input: &Path,
+        output: &Path,
+        expected_hash: [u8; 32],
+        patch: &OudiaPatch,
+    ) -> Result<SaveReceipt, BusinessError>;
+}
 
-/// API エンドポイント自動検出の結果。GUI の選択と手動入力は呼出側が担当する。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaveReceipt {
+    pub output_path: String,
+    pub bytes: u64,
+    pub sha256: String,
+}
+pub trait SettingsRepository: Send + Sync {
+    fn load(&self) -> Result<SettingsSnapshot, BusinessError>;
+    fn save_last_successful_endpoint(&self, endpoint: &MtrEndpoint) -> Result<(), BusinessError>;
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SettingsSnapshot {
+    pub last_endpoint: Option<String>,
+    pub station_aliases: BTreeMap<String, String>,
+    pub route_mappings: Vec<RouteMappingSetting>,
+    pub last_train_type: Option<usize>,
+    pub diagnostics: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteMappingSetting {
+    pub mtr_route_id: String,
+    pub mtr_signature: Vec<String>,
+    pub oudia_signature: Vec<String>,
+    pub version: u32,
+    pub station_slots: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BusinessErrorKind {
+    Validation,
+    Connection,
+    NoEndpoints,
+    MultipleEndpoints,
+    ParseUnsupported,
+    SelectionRequired,
+    StaleState,
+    SourceChanged,
+    OutputExists,
+    SaveVerification,
+    Permission,
+    Io,
+    Internal,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BusinessError {
+    pub kind: BusinessErrorKind,
+    pub message: String,
+    pub detail: Option<String>,
+}
+impl BusinessError {
+    fn new(kind: BusinessErrorKind, message: &str) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            detail: None,
+        }
+    }
+}
+
+/// 不透明なセッション、候補、プレビュー識別子。値を推測しても所有セッション照合を通過できない。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SessionId(pub String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CandidateId(pub String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PreviewId(pub String);
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EndpointDto {
+    pub url: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotDto {
+    pub routes: Vec<RouteDto>,
+    pub dimensions: Vec<serde_json::Value>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteDto {
+    pub id: String,
+    pub name: String,
+    pub stations: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InspectionDto {
+    pub file_type: String,
+    pub kijun_status: String,
+    pub diagrams: Vec<DiagramDto>,
+    pub train_types: Vec<usize>,
+    pub templates: Vec<TemplateDto>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagramDto {
+    pub index: usize,
+    pub train_count: usize,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateDto {
+    pub diagram_index: usize,
+    pub direction: String,
+    pub train_index: usize,
+    pub train_type_index: Option<usize>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteCandidateDto {
+    pub id: CandidateId,
+    pub direction: String,
+    pub station_mappings: Vec<StationMappingDto>,
+    pub rank: String,
+    pub reasons: Vec<String>,
+    pub auto_selected: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StationMappingDto {
+    pub mtr_station_index: usize,
+    pub oudia_station_slot: usize,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewDto {
+    pub id: PreviewId,
+    pub fixed_base_time: String,
+    pub stops: Vec<PreviewStopDto>,
+    pub warnings: Vec<String>,
+    pub crosses_midnight: bool,
+    pub operation_present: bool,
+    pub policy_choices: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreviewStopDto {
+    pub station: String,
+    pub existing_arrival: Option<String>,
+    pub existing_departure: Option<String>,
+    pub raw_arrival_millis: Option<i64>,
+    pub raw_departure_millis: Option<i64>,
+    pub rounded_arrival: Option<String>,
+    pub rounded_departure: Option<String>,
+    pub run_millis: Option<i64>,
+    pub dwell_millis: i64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManualMappingInput {
+    pub station_mappings: Vec<StationMappingDto>,
+}
+
+#[derive(Clone)]
+pub struct ConversionSessionStore {
+    inner: Arc<Mutex<Store>>,
+    max: usize,
+    next: Arc<AtomicU64>,
+}
+struct Store {
+    values: HashMap<SessionId, Session>,
+    order: VecDeque<SessionId>,
+}
+#[derive(Clone)]
+struct Session {
+    revision: u64,
+    endpoint: Option<MtrEndpoint>,
+    snapshot: Option<MtrSnapshotResponse>,
+    source: Option<(PathBuf, [u8; 32], OudiaSource)>,
+    selected_route: Option<String>,
+    candidates: HashMap<CandidateId, Candidate>,
+    previews: HashMap<PreviewId, Preview>,
+}
+#[derive(Clone)]
+struct Candidate {
+    revision: u64,
+    template: OudiaRouteTemplate,
+    mapping: Vec<StationMappingDto>,
+}
+#[derive(Clone)]
+struct Preview {
+    revision: u64,
+    template: OudiaRouteTemplate,
+    timetable: GeneratedTimetable,
+}
+impl ConversionSessionStore {
+    pub fn new(max: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Store {
+                values: HashMap::new(),
+                order: VecDeque::new(),
+            })),
+            max: max.max(1),
+            next: Arc::new(AtomicU64::new(0)),
+        }
+    }
+    pub fn create(&self, prefix: String) -> SessionId {
+        let id = SessionId(format!(
+            "{prefix}-{}",
+            self.next.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut s = self.inner.lock().expect("session store poisoned");
+        s.values.insert(
+            id.clone(),
+            Session {
+                revision: 0,
+                endpoint: None,
+                snapshot: None,
+                source: None,
+                selected_route: None,
+                candidates: HashMap::new(),
+                previews: HashMap::new(),
+            },
+        );
+        s.order.push_back(id.clone());
+        while s.values.len() > self.max {
+            if let Some(old) = s.order.pop_front() {
+                s.values.remove(&old);
+            }
+        }
+        id
+    }
+    pub fn remove(&self, id: &SessionId) -> bool {
+        let mut s = self.inner.lock().expect("session store poisoned");
+        s.order.retain(|v| v != id);
+        s.values.remove(id).is_some()
+    }
+    /// 現在の revision を診断・テスト向けに返す。内容はセッション外へ露出しない。
+    pub fn require(&self, id: &SessionId) -> Result<ConversionSession, BusinessError> {
+        self.with(id, |session| {
+            Ok(ConversionSession {
+                revision: session.revision,
+            })
+        })
+    }
+    fn with<R>(
+        &self,
+        id: &SessionId,
+        f: impl FnOnce(&Session) -> Result<R, BusinessError>,
+    ) -> Result<R, BusinessError> {
+        let s = self.inner.lock().expect("session store poisoned");
+        f(s.values.get(id).ok_or_else(|| {
+            BusinessError::new(BusinessErrorKind::StaleState, "セッションが見つかりません")
+        })?)
+    }
+    fn update<R>(
+        &self,
+        id: &SessionId,
+        f: impl FnOnce(&mut Session) -> Result<R, BusinessError>,
+    ) -> Result<R, BusinessError> {
+        let mut s = self.inner.lock().expect("session store poisoned");
+        f(s.values.get_mut(id).ok_or_else(|| {
+            BusinessError::new(BusinessErrorKind::StaleState, "セッションが見つかりません")
+        })?)
+    }
+}
+
+/// セッションの公開可能な最小状態。候補・原本・パッチは保持しない。
+#[derive(Debug, Clone)]
+pub struct ConversionSession {
+    pub revision: u64,
+}
+fn invalidate(session: &mut Session) {
+    session.revision += 1;
+    session.candidates.clear();
+    session.previews.clear();
+}
+
+/// P09 の最小縦切り。セッションごとに上流入力と下流生成物を一貫して保持する。
+pub struct ConversionService<'a, P: ?Sized, C: ?Sized, R: ?Sized, S: ?Sized, V: ?Sized> {
+    store: ConversionSessionStore,
+    ports: &'a P,
+    client: &'a C,
+    repository: &'a R,
+    settings: &'a S,
+    saver: &'a V,
+}
+impl<
+    'a,
+    P: ListeningPortProvider + ?Sized,
+    C: MtrApiClient + ?Sized,
+    R: OudiaRepository + ?Sized,
+    S: SettingsRepository + ?Sized,
+    V: ValidatedSavePort + ?Sized,
+> ConversionService<'a, P, C, R, S, V>
+{
+    pub fn new(
+        store: ConversionSessionStore,
+        ports: &'a P,
+        client: &'a C,
+        repository: &'a R,
+        settings: &'a S,
+        saver: &'a V,
+    ) -> Self {
+        Self {
+            store,
+            ports,
+            client,
+            repository,
+            settings,
+            saver,
+        }
+    }
+    pub fn create_session(&self) -> SessionId {
+        self.store.create("session".into())
+    }
+    pub fn remove_session(&self, id: &SessionId) -> bool {
+        self.store.remove(id)
+    }
+    pub async fn detect_mtr_endpoint(
+        &self,
+        id: &SessionId,
+    ) -> Result<Vec<EndpointDto>, BusinessError> {
+        let previous = self
+            .settings
+            .load()?
+            .last_endpoint
+            .and_then(|v| MtrEndpoint::parse(&v).ok());
+        let result = MtrEndpointDiscoveryService::new(self.ports, self.client)
+            .detect(previous)
+            .await;
+        let endpoints = match result {
+            MtrEndpointDiscovery::Single(e) => vec![e],
+            MtrEndpointDiscovery::Multiple(v) => v,
+            MtrEndpointDiscovery::NoListeningPorts
+            | MtrEndpointDiscovery::NoValidEndpoints { .. } => {
+                return Err(BusinessError::new(
+                    BusinessErrorKind::NoEndpoints,
+                    "MTR API が見つかりません",
+                ));
+            }
+            MtrEndpointDiscovery::PortEnumerationFailed(_) => {
+                return Err(BusinessError::new(
+                    BusinessErrorKind::Connection,
+                    "待受ポートを取得できません",
+                ));
+            }
+        };
+        if endpoints.len() == 1 {
+            self.settings.save_last_successful_endpoint(&endpoints[0])?;
+        }
+        self.store.update(id, |s| {
+            invalidate(s);
+            s.endpoint = endpoints.first().cloned();
+            Ok(())
+        })?;
+        Ok(endpoints
+            .into_iter()
+            .map(|e| EndpointDto {
+                url: e.as_url().to_string(),
+            })
+            .collect())
+    }
+    pub async fn fetch_mtr_snapshot(
+        &self,
+        id: &SessionId,
+        endpoint: &MtrEndpoint,
+        dimension: u32,
+    ) -> Result<SnapshotDto, BusinessError> {
+        let response = self
+            .client
+            .fetch_snapshot(endpoint, dimension)
+            .await
+            .map_err(map_application_error)?;
+        self.settings.save_last_successful_endpoint(endpoint)?;
+        let dto = snapshot_dto(&response);
+        self.store.update(id, |s| {
+            invalidate(s);
+            s.endpoint = Some(endpoint.clone());
+            s.snapshot = Some(response);
+            s.selected_route = None;
+            Ok(())
+        })?;
+        Ok(dto)
+    }
+    pub fn inspect_oudia(
+        &self,
+        id: &SessionId,
+        location: &Path,
+    ) -> Result<InspectionDto, BusinessError> {
+        let source = self.repository.read(location)?;
+        let inspection = inspection_dto(&source);
+        let hash: [u8; 32] = Sha256::digest(&source.bytes).into();
+        self.store.update(id, |s| {
+            invalidate(s);
+            s.source = Some((location.to_path_buf(), hash, source));
+            Ok(())
+        })?;
+        Ok(inspection)
+    }
+    pub fn find_route_candidates(
+        &self,
+        id: &SessionId,
+        route_id: &str,
+        diagram_index: Option<usize>,
+        train_type: Option<usize>,
+    ) -> Result<Vec<RouteCandidateDto>, BusinessError> {
+        let aliases = self.settings.load()?.station_aliases;
+        self.store.update(id, |s| {
+            let snapshot = s.snapshot.as_ref().ok_or_else(|| {
+                BusinessError::new(
+                    BusinessErrorKind::SelectionRequired,
+                    "MTR スナップショットを取得してください",
+                )
+            })?;
+            let route = snapshot
+                .snapshot
+                .routes
+                .iter()
+                .find(|v| v.route_id == route_id)
+                .ok_or_else(|| {
+                    BusinessError::new(BusinessErrorKind::Validation, "路線が見つかりません")
+                })?;
+            let source = s.source.as_ref().ok_or_else(|| {
+                BusinessError::new(
+                    BusinessErrorKind::SelectionRequired,
+                    "OuDia を読み込んでください",
+                )
+            })?;
+            let templates = templates_for(&source.2, diagram_index)?;
+            let outcome = match_mtr_route(
+                &route
+                    .stops
+                    .iter()
+                    .map(|v| v.station_name.clone())
+                    .collect::<Vec<_>>(),
+                &templates,
+                &aliases,
+                train_type,
+            );
+            invalidate(s);
+            s.selected_route = Some(route_id.into());
+            let candidates = match outcome {
+                RouteMatchOutcome::NoCandidate { .. } => Vec::new(),
+                RouteMatchOutcome::Automatic { candidate } => vec![(candidate, true)],
+                RouteMatchOutcome::Manual { candidates, .. } => {
+                    candidates.into_iter().map(|v| (v, false)).collect()
+                }
+            };
+            let mut result = Vec::new();
+            for (candidate, auto_selected) in candidates {
+                let template = templates
+                    .iter()
+                    .find(|t| {
+                        t.diagram_index == candidate.id.diagram_index
+                            && t.direction == candidate.id.direction
+                            && t.train_index == candidate.id.train_index
+                    })
+                    .expect("candidate template")
+                    .clone();
+                let mapping: Vec<StationMappingDto> = candidate
+                    .station_mapping
+                    .iter()
+                    .map(|v| StationMappingDto {
+                        mtr_station_index: v.mtr_station_index,
+                        oudia_station_slot: v.oudia_slot_index,
+                    })
+                    .collect();
+                let cid = CandidateId(format!("candidate-{}-{}", s.revision, s.candidates.len()));
+                s.candidates.insert(
+                    cid.clone(),
+                    Candidate {
+                        revision: s.revision,
+                        template,
+                        mapping: mapping.clone(),
+                    },
+                );
+                result.push(candidate_dto(cid, candidate, mapping, auto_selected));
+            }
+            Ok(result)
+        })
+    }
+    pub fn build_preview(
+        &self,
+        id: &SessionId,
+        candidate_id: Option<&CandidateId>,
+        manual: Option<ManualMappingInput>,
+    ) -> Result<PreviewDto, BusinessError> {
+        self.store.update(id, |s| {
+            let candidate = candidate_id
+                .and_then(|v| s.candidates.get(v))
+                .cloned()
+                .ok_or_else(|| {
+                    BusinessError::new(
+                        BusinessErrorKind::StaleState,
+                        "候補が現在のセッションにありません",
+                    )
+                })?;
+            if candidate.revision != s.revision {
+                return Err(BusinessError::new(
+                    BusinessErrorKind::StaleState,
+                    "候補が古くなっています",
+                ));
+            }
+            let mapping = manual
+                .map(|v| v.station_mappings)
+                .unwrap_or(candidate.mapping.clone());
+            let route = selected_route(s)?;
+            if mapping.len() != route.stops.len()
+                || mapping
+                    .iter()
+                    .enumerate()
+                    .any(|(i, v)| v.mtr_station_index != i)
+            {
+                return Err(BusinessError::new(
+                    BusinessErrorKind::SelectionRequired,
+                    "全駅の対応を確定してください",
+                ));
+            }
+            let timetable = generate_timetable(route).map_err(domain_error)?;
+            let source = &s
+                .source
+                .as_ref()
+                .ok_or_else(|| {
+                    BusinessError::new(
+                        BusinessErrorKind::SelectionRequired,
+                        "OuDia を読み込んでください",
+                    )
+                })?
+                .2;
+            let operation_present = source
+                .document
+                .properties
+                .iter()
+                .any(|v| v.key.starts_with("Operation"));
+            let pid = PreviewId(format!("preview-{}-{}", s.revision, s.previews.len()));
+            let dto = preview_dto(pid.clone(), route, &timetable, operation_present);
+            s.previews.insert(
+                pid,
+                Preview {
+                    revision: s.revision,
+                    template: candidate.template,
+                    timetable,
+                },
+            );
+            Ok(dto)
+        })
+    }
+    pub fn save_conversion(
+        &self,
+        id: &SessionId,
+        preview_id: &PreviewId,
+        output: &Path,
+        policy: OperationPolicy,
+    ) -> Result<SaveReceipt, BusinessError> {
+        let (input, hash, source, preview) = self.store.with(id, |s| {
+            let (_, h, source) = s.source.as_ref().ok_or_else(|| {
+                BusinessError::new(
+                    BusinessErrorKind::SelectionRequired,
+                    "OuDia を読み込んでください",
+                )
+            })?;
+            let preview = s.previews.get(preview_id).cloned().ok_or_else(|| {
+                BusinessError::new(
+                    BusinessErrorKind::StaleState,
+                    "プレビューが現在のセッションにありません",
+                )
+            })?;
+            if preview.revision != s.revision {
+                return Err(BusinessError::new(
+                    BusinessErrorKind::StaleState,
+                    "プレビューが古くなっています",
+                ));
+            }
+            Ok((
+                s.source.as_ref().unwrap().0.clone(),
+                *h,
+                source.clone(),
+                preview,
+            ))
+        })?;
+        if preview.timetable.crosses_midnight {
+            return Err(BusinessError::new(
+                BusinessErrorKind::Validation,
+                "24 時を超える時刻は保存できません",
+            ));
+        }
+        let patch = build_eki_jikoku_patch(&source, &preview.template, &preview.timetable, policy)
+            .map_err(|_| {
+                BusinessError::new(
+                    BusinessErrorKind::SaveVerification,
+                    "安全な保存計画を作成できません",
+                )
+            })?;
+        self.saver.save(&input, output, hash, &patch)
+    }
+}
+
+fn selected_route(s: &Session) -> Result<&MtrRouteSnapshot, BusinessError> {
+    let snapshot = s.snapshot.as_ref().ok_or_else(|| {
+        BusinessError::new(
+            BusinessErrorKind::SelectionRequired,
+            "MTR スナップショットを取得してください",
+        )
+    })?;
+    snapshot
+        .snapshot
+        .routes
+        .iter()
+        .find(|r| Some(&r.route_id) == s.selected_route.as_ref())
+        .ok_or_else(|| {
+            BusinessError::new(
+                BusinessErrorKind::SelectionRequired,
+                "路線を選択してください",
+            )
+        })
+}
+fn templates_for(
+    source: &OudiaSource,
+    diagram: Option<usize>,
+) -> Result<Vec<OudiaRouteTemplate>, BusinessError> {
+    match build_oudia_route_templates(&source.document) {
+        ReferenceDiagramSelection::Selected(v)
+            if diagram.is_none() || diagram == Some(v.diagram_index) =>
+        {
+            Ok(v.templates)
+        }
+        ReferenceDiagramSelection::Selected(_) => Err(BusinessError::new(
+            BusinessErrorKind::Validation,
+            "ダイヤ選択が一致しません",
+        )),
+        ReferenceDiagramSelection::NeedsSelection { .. } => {
+            let index = diagram.ok_or_else(|| {
+                BusinessError::new(
+                    BusinessErrorKind::SelectionRequired,
+                    "基準ダイヤを選択してください",
+                )
+            })?;
+            let mut copy = source.document.clone();
+            copy.kijun_dia_index = KijunDiaIndex::Valid(index);
+            match build_oudia_route_templates(&copy) {
+                ReferenceDiagramSelection::Selected(v) => Ok(v.templates),
+                _ => Err(BusinessError::new(
+                    BusinessErrorKind::Validation,
+                    "ダイヤ選択が範囲外です",
+                )),
+            }
+        }
+    }
+}
+fn snapshot_dto(response: &MtrSnapshotResponse) -> SnapshotDto {
+    SnapshotDto {
+        routes: response
+            .snapshot
+            .routes
+            .iter()
+            .map(|r| RouteDto {
+                id: r.route_id.clone(),
+                name: r.display_name.clone(),
+                stations: r.stops.iter().map(|v| v.station_name.clone()).collect(),
+            })
+            .collect(),
+        dimensions: response.available_dimensions.clone(),
+    }
+}
+fn inspection_dto(source: &OudiaSource) -> InspectionDto {
+    let templates = match build_oudia_route_templates(&source.document) {
+        ReferenceDiagramSelection::Selected(v) => v.templates,
+        _ => Vec::new(),
+    };
+    InspectionDto {
+        file_type: source.document.file_type.clone(),
+        kijun_status: match source.document.kijun_dia_index {
+            KijunDiaIndex::Valid(_) => "valid",
+            KijunDiaIndex::Missing => "missing",
+            KijunDiaIndex::Invalid => "invalid",
+            KijunDiaIndex::OutOfRange { .. } => "out_of_range",
+        }
+        .into(),
+        diagrams: source
+            .document
+            .diagrams
+            .iter()
+            .enumerate()
+            .map(|(index, d)| DiagramDto {
+                index,
+                train_count: d.trains.len(),
+            })
+            .collect(),
+        train_types: source
+            .document
+            .diagrams
+            .iter()
+            .flat_map(|d| d.trains.iter().filter_map(|t| t.train_type_index))
+            .collect(),
+        templates: templates
+            .into_iter()
+            .map(|t| TemplateDto {
+                diagram_index: t.diagram_index,
+                direction: direction(t.direction).into(),
+                train_index: t.train_index,
+                train_type_index: t.train_type_index,
+            })
+            .collect(),
+    }
+}
+fn candidate_dto(
+    id: CandidateId,
+    c: RouteMatchCandidate,
+    mapping: Vec<StationMappingDto>,
+    auto_selected: bool,
+) -> RouteCandidateDto {
+    RouteCandidateDto {
+        id,
+        direction: direction(c.direction).into(),
+        station_mappings: mapping,
+        rank: format!("{:?}", c.rank),
+        reasons: c
+            .diagnostics
+            .into_iter()
+            .map(|v| format!("{:?}", v))
+            .collect(),
+        auto_selected,
+    }
+}
+fn preview_dto(
+    id: PreviewId,
+    route: &MtrRouteSnapshot,
+    timetable: &GeneratedTimetable,
+    operation_present: bool,
+) -> PreviewDto {
+    PreviewDto {
+        id,
+        fixed_base_time: "10:00:00".into(),
+        stops: timetable
+            .stops
+            .iter()
+            .zip(&route.stops)
+            .map(|(t, r)| PreviewStopDto {
+                station: r.station_name.clone(),
+                existing_arrival: None,
+                existing_departure: None,
+                raw_arrival_millis: t.arrival.map(|v| v.millis()),
+                raw_departure_millis: t.departure.map(|v| v.millis()),
+                rounded_arrival: t.rounded_arrival_display.clone(),
+                rounded_departure: t.rounded_departure_display.clone(),
+                run_millis: r.run_millis_to_next.map(|v| v.millis()),
+                dwell_millis: r.dwell_millis.millis(),
+            })
+            .collect(),
+        warnings: if timetable.crosses_midnight {
+            vec!["24 時を超える時刻は保存できません".into()]
+        } else {
+            Vec::new()
+        },
+        crosses_midnight: timetable.crosses_midnight,
+        operation_present,
+        policy_choices: if operation_present {
+            vec!["preserve".into(), "remove_target_train".into()]
+        } else {
+            Vec::new()
+        },
+    }
+}
+fn direction(v: OudiaDirection) -> &'static str {
+    match v {
+        OudiaDirection::Kudari => "kudari",
+        OudiaDirection::Nobori => "nobori",
+    }
+}
+fn domain_error(_: impl std::fmt::Display) -> BusinessError {
+    BusinessError::new(BusinessErrorKind::Validation, "時刻表を生成できません")
+}
+fn map_application_error(e: ApplicationError) -> BusinessError {
+    BusinessError::new(
+        match e {
+            ApplicationError::Timeout | ApplicationError::Transport { .. } => {
+                BusinessErrorKind::Connection
+            }
+            ApplicationError::InvalidEndpoint { .. } => BusinessErrorKind::Validation,
+            _ => BusinessErrorKind::ParseUnsupported,
+        },
+        "MTR API を取得できません",
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MtrEndpointDiscovery {
-    /// OS に localhost 到達可能な待受ポートがなかった。
     NoListeningPorts,
-    /// OS の待受ポート列挙に失敗した。
     PortEnumerationFailed(ApplicationError),
-    /// 応答不能または MTR API 応答として不正な候補だけだった。
     NoValidEndpoints {
         attempted: usize,
         unreachable: usize,
         invalid_responses: usize,
     },
-    /// 一意の MTR API エンドポイントを検出した。
     Single(MtrEndpoint),
-    /// 複数の MTR API エンドポイントを検出したため自動確定しない。
     Multiple(Vec<MtrEndpoint>),
 }
-
-/// 前回 URL と OS 列挙ポートを用いて MTR API を検出する Application service。
 pub struct MtrEndpointDiscoveryService<'a, P: ?Sized, C: ?Sized> {
     ports: &'a P,
     client: &'a C,
 }
-
 impl<'a, P: ListeningPortProvider + ?Sized, C: MtrApiClient + ?Sized>
     MtrEndpointDiscoveryService<'a, P, C>
 {
-    /// Port 実装と HTTP client を借用して service を作る。
     pub fn new(ports: &'a P, client: &'a C) -> Self {
         Self { ports, client }
     }
-
-    /// 前回成功 URL を先に検証し、失敗時だけ列挙済みポートを最大16並列で検証する。
     pub async fn detect(&self, previous: Option<MtrEndpoint>) -> MtrEndpointDiscovery {
         let mut attempted = 0;
         let mut unreachable = 0;
-        let mut invalid_responses = 0;
-        let mut valid = Vec::new();
+        let mut invalid = 0;
         let mut seen = std::collections::HashSet::new();
-
-        if let Some(endpoint) = previous {
+        if let Some(e) = previous {
             attempted += 1;
-            match self.client.fetch_snapshot(&endpoint, 0).await {
-                Ok(_) => return MtrEndpointDiscovery::Single(endpoint),
-                Err(error) => count_probe_failure(error, &mut unreachable, &mut invalid_responses),
+            if self.client.fetch_snapshot(&e, 0).await.is_ok() {
+                return MtrEndpointDiscovery::Single(e);
             }
-            seen.insert(endpoint.as_url().as_str().to_owned());
+            unreachable += 1;
+            seen.insert(e.as_url().to_string());
         }
-
         let ports = match self.ports.listening_tcp_ports() {
-            Ok(ports) => ports,
-            Err(error) => return MtrEndpointDiscovery::PortEnumerationFailed(error),
+            Ok(v) => v,
+            Err(e) => return MtrEndpointDiscovery::PortEnumerationFailed(e),
         };
-        let mut endpoints = Vec::new();
-        for port in ports.into_iter().filter(|port| *port != 0) {
-            for input in [
-                format!("http://127.0.0.1:{port}/"),
-                format!("http://[::1]:{port}/"),
-            ] {
-                // 定数の loopback URL だけを組み立てるので parser 失敗は不変条件違反である。
-                let endpoint = MtrEndpoint::parse(&input).expect("generated loopback endpoint");
-                if seen.insert(endpoint.as_url().as_str().to_owned()) {
-                    endpoints.push(endpoint);
-                }
-            }
-        }
+        let endpoints: Vec<_> = ports
+            .into_iter()
+            .filter(|p| *p != 0)
+            .flat_map(|p| {
+                [
+                    format!("http://127.0.0.1:{p}/"),
+                    format!("http://[::1]:{p}/"),
+                ]
+            })
+            .map(|v| MtrEndpoint::parse(&v).expect("loopback"))
+            .filter(|v| seen.insert(v.as_url().to_string()))
+            .collect();
         if endpoints.is_empty() {
             return if attempted == 0 {
                 MtrEndpointDiscovery::NoListeningPorts
@@ -222,52 +940,85 @@ impl<'a, P: ListeningPortProvider + ?Sized, C: MtrApiClient + ?Sized>
                 MtrEndpointDiscovery::NoValidEndpoints {
                     attempted,
                     unreachable,
-                    invalid_responses,
+                    invalid_responses: invalid,
                 }
             };
         }
-
-        let outcomes = stream::iter(endpoints)
-            .map(|endpoint| async move {
-                let result = self.client.fetch_snapshot(&endpoint, 0).await;
-                (endpoint, result)
+        let result = stream::iter(endpoints)
+            .map(|e| async move {
+                let r = self.client.fetch_snapshot(&e, 0).await;
+                (e, r)
             })
             .buffer_unordered(16)
             .collect::<Vec<_>>()
             .await;
-        for (endpoint, result) in outcomes {
+        let mut valid = Vec::new();
+        for (e, r) in result {
             attempted += 1;
-            match result {
-                Ok(_) => valid.push(endpoint),
-                Err(error) => count_probe_failure(error, &mut unreachable, &mut invalid_responses),
+            match r {
+                Ok(_) => valid.push(e),
+                Err(ApplicationError::Timeout | ApplicationError::Transport { .. }) => {
+                    unreachable += 1
+                }
+                Err(_) => invalid += 1,
             }
         }
-        valid.sort_by(|left, right| left.as_url().as_str().cmp(right.as_url().as_str()));
+        valid.sort_by(|a, b| a.as_url().as_str().cmp(b.as_url().as_str()));
         match valid.len() {
             0 => MtrEndpointDiscovery::NoValidEndpoints {
                 attempted,
                 unreachable,
-                invalid_responses,
+                invalid_responses: invalid,
             },
-            1 => MtrEndpointDiscovery::Single(valid.pop().expect("one endpoint")),
+            1 => MtrEndpointDiscovery::Single(valid.pop().unwrap()),
             _ => MtrEndpointDiscovery::Multiple(valid),
         }
     }
 }
-
-fn count_probe_failure(
-    error: ApplicationError,
-    unreachable: &mut usize,
-    invalid_responses: &mut usize,
-) {
-    match error {
-        ApplicationError::Timeout | ApplicationError::Transport { .. } => *unreachable += 1,
-        _ => *invalid_responses += 1,
+pub struct DetectMtrEndpoint<'a, P: ?Sized, C: ?Sized>(pub MtrEndpointDiscoveryService<'a, P, C>);
+impl<'a, P: ListeningPortProvider + ?Sized, C: MtrApiClient + ?Sized> DetectMtrEndpoint<'a, P, C> {
+    pub fn new(p: &'a P, c: &'a C) -> Self {
+        Self(MtrEndpointDiscoveryService::new(p, c))
+    }
+    pub async fn execute(&self, previous: Option<MtrEndpoint>) -> MtrEndpointDiscovery {
+        self.0.detect(previous).await
     }
 }
 
-/// Infrastructure が実装する、Domain 型を返す最小の Port。
-pub trait DomainPort {
-    /// Domain 層を返す。
-    fn domain_layer(&self) -> DomainLayer;
+/// セッション非使用の既存呼出し互換用 snapshot 取得ユースケース。
+pub struct FetchMtrSnapshot<'a, C: ?Sized, S: ?Sized> {
+    client: &'a C,
+    settings: &'a S,
+}
+impl<'a, C: MtrApiClient + ?Sized, S: SettingsRepository + ?Sized> FetchMtrSnapshot<'a, C, S> {
+    pub fn new(client: &'a C, settings: &'a S) -> Self {
+        Self { client, settings }
+    }
+    pub async fn execute(
+        &self,
+        endpoint: &MtrEndpoint,
+        dimension: u32,
+    ) -> Result<SnapshotDto, BusinessError> {
+        let response = self
+            .client
+            .fetch_snapshot(endpoint, dimension)
+            .await
+            .map_err(map_application_error)?;
+        self.settings.save_last_successful_endpoint(endpoint)?;
+        Ok(snapshot_dto(&response))
+    }
+}
+
+/// セッション非使用の既存呼出し互換用 OuDia 検査ユースケース。
+pub struct InspectOudia<'a, R: ?Sized> {
+    repository: &'a R,
+}
+impl<'a, R: OudiaRepository + ?Sized> InspectOudia<'a, R> {
+    pub fn new(repository: &'a R) -> Self {
+        Self { repository }
+    }
+    pub fn execute(&self, path: &Path) -> Result<(OudiaSource, InspectionDto), BusinessError> {
+        let source = self.repository.read(path)?;
+        Ok((source.clone(), inspection_dto(&source)))
+    }
 }

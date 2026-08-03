@@ -2005,7 +2005,9 @@ dependencies = [
  "async-trait",
  "futures-util",
  "mtr-oudia-domain",
+ "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "url",
 ]
@@ -2026,6 +2028,7 @@ dependencies = [
  "mtr-oudia-application",
  "mtr-oudia-domain",
  "reqwest",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",

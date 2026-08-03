@@ -5,17 +5,123 @@ use mtr_oudia_application::DomainPort;
 #[cfg(not(target_os = "windows"))]
 use mtr_oudia_application::ListeningPortProvider;
 use mtr_oudia_application::{
-    ApplicationError, MtrApiClient, MtrEndpoint, MtrSnapshotResponse, async_trait,
+    ApplicationError, BusinessError, BusinessErrorKind, MtrApiClient, MtrEndpoint,
+    MtrSnapshotResponse, OudiaRepository, SaveReceipt, SettingsRepository, SettingsSnapshot,
+    ValidatedSavePort, async_trait,
 };
 use mtr_oudia_domain::{
     DomainLayer, MtrNetworkSnapshot, MtrRouteSnapshot, MtrStopSnapshot, ServiceTimeMillis,
 };
 use serde_json::{Map, Value};
+use sha2::Digest;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod safe_save;
 pub use safe_save::*;
+
+/// 設定専用の小さな JSON adapter。壊れた設定は既定値と診断へ退避する。
+pub struct JsonSettingsRepository {
+    path: std::path::PathBuf,
+}
+impl JsonSettingsRepository {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+impl SettingsRepository for JsonSettingsRepository {
+    fn load(&self) -> Result<SettingsSnapshot, BusinessError> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(v) => v,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(SettingsSnapshot::default());
+            }
+            Err(e) => return Err(io_business_error(e)),
+        };
+        match serde_json::from_slice(&bytes) {
+            Ok(v) => Ok(v),
+            Err(_) => Ok(SettingsSnapshot {
+                diagnostics: vec!["設定ファイルが不正なため既定値を使用します".into()],
+                ..SettingsSnapshot::default()
+            }),
+        }
+    }
+    fn save_last_successful_endpoint(&self, endpoint: &MtrEndpoint) -> Result<(), BusinessError> {
+        let mut settings = self.load()?;
+        settings.last_endpoint = Some(endpoint.as_url().to_string());
+        let bytes = serde_json::to_vec_pretty(&settings).map_err(|_| BusinessError {
+            kind: BusinessErrorKind::Internal,
+            message: "設定を保存できません".into(),
+            detail: None,
+        })?;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).map_err(io_business_error)?;
+        }
+        let temporary = self.path.with_extension("json.tmp");
+        std::fs::write(&temporary, bytes).map_err(io_business_error)?;
+        std::fs::rename(temporary, &self.path).map_err(io_business_error)
+    }
+}
+
+/// filesystem の OuDia 原本を Application の読込 Port へ接続する adapter。
+pub struct FileOudiaRepository;
+impl OudiaRepository for FileOudiaRepository {
+    fn read(
+        &self,
+        location: &std::path::Path,
+    ) -> Result<mtr_oudia_domain::OudiaSource, BusinessError> {
+        let bytes = std::fs::read(location).map_err(io_business_error)?;
+        mtr_oudia_domain::parse_oudia(bytes).map_err(|_| BusinessError {
+            kind: BusinessErrorKind::ParseUnsupported,
+            message: "OuDia を解析できません".into(),
+            detail: None,
+        })
+    }
+}
+impl ValidatedSavePort for SafeOudiaWriter {
+    fn save(
+        &self,
+        input: &std::path::Path,
+        output: &std::path::Path,
+        expected_hash: [u8; 32],
+        patch: &mtr_oudia_domain::OudiaPatch,
+    ) -> Result<SaveReceipt, BusinessError> {
+        SafeOudiaWriter::save(self, input, output, expected_hash, patch)
+            .map_err(safe_save_business_error)?;
+        let bytes = std::fs::read(output).map_err(io_business_error)?;
+        Ok(SaveReceipt {
+            output_path: output.display().to_string(),
+            bytes: bytes.len() as u64,
+            sha256: format!("{:x}", sha2::Sha256::digest(bytes)),
+        })
+    }
+}
+fn io_business_error(error: std::io::Error) -> BusinessError {
+    BusinessError {
+        kind: if error.kind() == std::io::ErrorKind::PermissionDenied {
+            BusinessErrorKind::Permission
+        } else {
+            BusinessErrorKind::Io
+        },
+        message: "ファイル操作に失敗しました".into(),
+        detail: None,
+    }
+}
+fn safe_save_business_error(error: SafeSaveError) -> BusinessError {
+    let kind = match error {
+        SafeSaveError::InputChanged => BusinessErrorKind::SourceChanged,
+        SafeSaveError::OutputAlreadyExists
+        | SafeSaveError::SamePath
+        | SafeSaveError::FinalizeRace => BusinessErrorKind::OutputExists,
+        SafeSaveError::Patch(_) | SafeSaveError::Reparse(_) => BusinessErrorKind::SaveVerification,
+        SafeSaveError::Io(_) => BusinessErrorKind::Io,
+    };
+    BusinessError {
+        kind,
+        message: "安全な保存に失敗しました".into(),
+        detail: None,
+    }
+}
 
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
 const RESPONSE_TIMEOUT: Duration = Duration::from_millis(1_500);
