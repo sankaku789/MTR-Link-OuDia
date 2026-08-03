@@ -57,6 +57,15 @@ pub struct OudiaDocument {
     pub unknown_lines: Vec<OudiaRawLine>,
     /// ダイヤとその列車。
     pub diagrams: Vec<OudiaDiagram>,
+    /// 出現順の駅スロット名。
+    pub station_slots: Vec<OudiaStationSlot>,
+}
+
+/// OuDia 路線定義内の駅スロット。
+#[derive(Debug, Clone)]
+pub struct OudiaStationSlot {
+    pub name: String,
+    pub name_range: SourceRange,
 }
 
 /// 基準ダイヤ指定の読込状態。
@@ -108,6 +117,8 @@ pub struct OudiaDiagram {
 pub struct OudiaTrain {
     pub direction: OudiaDirection,
     pub section_range: SourceRange,
+    /// `Ressyasyubetsu` が数値として取得できた場合の種別インデックス。
+    pub train_type_index: Option<usize>,
     pub eki_jikoku: EkiJikoku,
 }
 
@@ -169,11 +180,13 @@ pub fn parse_oudia(bytes: Vec<u8>) -> Result<OudiaSource, DomainError> {
         sections: Vec::new(),
         unknown_lines: Vec::new(),
         diagrams: Vec::new(),
+        station_slots: Vec::new(),
     };
     let mut sections: Vec<OpenSection> = Vec::new();
-    let mut current_diagram = None;
-    let mut current_direction = None;
-    let mut current_train = None;
+    let mut current_diagram: Option<usize> = None;
+    let mut current_direction: Option<OudiaDirection> = None;
+    let mut current_train: Option<usize> = None;
+    let mut current_station: Option<usize> = None;
     let mut kijun_value = None;
 
     for line in lines {
@@ -189,7 +202,14 @@ pub fn parse_oudia(bytes: Vec<u8>) -> Result<OudiaSource, DomainError> {
             };
             document.sections[open.section_index].range = SourceRange::new(open.start, line.end)?;
             match open.name.as_str() {
-                "Ressya" => current_train = None,
+                "Ressya" => {
+                    if let (Some(diagram), Some(train)) = (current_diagram, current_train) {
+                        document.diagrams[diagram].trains[train].section_range =
+                            SourceRange::new(open.start, line.end)?;
+                    }
+                    current_train = None;
+                }
+                "Eki" => current_station = None,
                 "Kudari" | "Nobori" => current_direction = None,
                 "Dia" => current_diagram = None,
                 _ => {}
@@ -233,12 +253,20 @@ pub fn parse_oudia(bytes: Vec<u8>) -> Result<OudiaSource, DomainError> {
                     document.diagrams[diagram].trains.push(OudiaTrain {
                         direction,
                         section_range: SourceRange::new(line.start, line.end)?,
+                        train_type_index: None,
                         eki_jikoku: EkiJikoku {
                             cells: Vec::new(),
                             value_range: SourceRange::new(line.end, line.end)?,
                         },
                     });
                     current_train = Some(document.diagrams[diagram].trains.len() - 1);
+                }
+                "Eki" => {
+                    document.station_slots.push(OudiaStationSlot {
+                        name: String::new(),
+                        name_range: SourceRange::new(line.end, line.end)?,
+                    });
+                    current_station = Some(document.station_slots.len() - 1);
                 }
                 _ => {}
             }
@@ -277,6 +305,18 @@ pub fn parse_oudia(bytes: Vec<u8>) -> Result<OudiaSource, DomainError> {
                 };
                 document.diagrams[diagram].trains[train].eki_jikoku =
                     parse_eki_jikoku(&bytes, property.value_range, encoding)?;
+            }
+            if property.key == "Ressyasyubetsu"
+                && let (Some(diagram), Some(train)) = (current_diagram, current_train)
+            {
+                document.diagrams[diagram].trains[train].train_type_index =
+                    property.value.parse().ok();
+            }
+            if property.key == "Ekimei"
+                && let Some(station) = current_station
+            {
+                document.station_slots[station].name = property.value.clone();
+                document.station_slots[station].name_range = property.value_range;
             }
             document.properties.push(property);
             continue;

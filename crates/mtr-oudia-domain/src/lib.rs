@@ -4,9 +4,11 @@ use std::error::Error;
 use std::fmt;
 
 pub mod oudia;
+pub mod route_matching;
 pub mod timetable;
 
 pub use oudia::*;
+pub use route_matching::*;
 pub use timetable::*;
 
 /// Domain 層で検出した不正な値や演算結果。
