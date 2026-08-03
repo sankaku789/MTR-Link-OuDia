@@ -1,0 +1,8 @@
+[package]
+name = "mtr-oudia-infrastructure"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mtr-oudia-application = { path = "../mtr-oudia-application" }
+mtr-oudia-domain = { path = "../mtr-oudia-domain" }
