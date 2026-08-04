@@ -9,9 +9,10 @@ export type Inspection = {
   file_type: string; line_name?: string; station_count: number; kijun_status: string;
   diagrams: { index: number; train_count: number }[];
   train_types: number[];
-  templates: { diagram_index: number; direction: string; train_index: number; train_type_index?: number; active_station_slots: StationSlot[] }[];
+  train_type_names: string[];
+  templates: { diagram_index: number; direction: string; train_index: number; train_type_index?: number; active_station_slots: StationSlot[]; route_station_slots: StationSlot[] }[];
 };
-export type StationSlot = { index: number; name: string; previous_name?: string; next_name?: string };
+export type StationSlot = { index: number; name: string; handling_code?: number | null; previous_name?: string; next_name?: string };
 export type Candidate = {
   id: string; diagram_index: number; train_index: number; direction: string; rank: string; reasons: string[]; auto_selected: boolean; manual_only: boolean;
   station_mappings: { mtr_station_index: number; oudia_station_slot: number }[];
@@ -49,6 +50,7 @@ async function callWithoutInput<T>(command: string): Promise<T> {
 
 export const api = {
   createSession: () => callWithoutInput<string>('create_conversion_session'),
+  autoDetectionSupported: () => callWithoutInput<boolean>('is_mtr_auto_detection_supported'),
   detect: (sessionId?: string) => call<[string, Endpoint[]]>('detect_mtr_endpoints', { sessionId }),
   snapshot: (sessionId: string, endpoint: string, dimension: number) =>
     call<Snapshot>('fetch_mtr_snapshot', { sessionId, endpoint, dimension }),

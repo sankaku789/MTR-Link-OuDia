@@ -114,6 +114,15 @@ fn create_conversion_session(state: tauri::State<'_, AppState>) -> String {
     create_conversion_session_inner(&state)
 }
 
+fn auto_detection_supported() -> bool {
+    cfg!(target_os = "windows")
+}
+
+#[tauri::command]
+fn is_mtr_auto_detection_supported() -> bool {
+    auto_detection_supported()
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotRequest {
@@ -270,6 +279,7 @@ pub fn run() {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             create_conversion_session,
+            is_mtr_auto_detection_supported,
             detect_mtr_endpoints,
             fetch_mtr_snapshot,
             inspect_oudia,
@@ -305,6 +315,11 @@ mod tests {
 
         assert!(!first.is_empty());
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn auto_detection_is_only_enabled_on_windows() {
+        assert_eq!(auto_detection_supported(), cfg!(target_os = "windows"));
     }
 
     #[test]

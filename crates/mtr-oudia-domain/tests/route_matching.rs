@@ -25,8 +25,8 @@ Ekimei=D
 Dia.
 Kudari.
 Ressya.
-Ressyasyubetsu=2
-EkiJikoku=1;10:00:00/10:00:00,,1;10:02:00/10:02:00,;/
+Syubetsu=2
+EkiJikoku=1;10:00:00/10:00:00,2$1,1;10:02:00/10:02:00,;/
 .
 .
 .
@@ -44,6 +44,8 @@ fn template(direction: OudiaDirection, slots: &[usize], names: &[&str]) -> Oudia
         train_type_index: Some(1),
         active_station_slots: slots.to_vec(),
         stop_pattern: Vec::new(),
+        route_station_slots: slots.to_vec(),
+        route_stop_pattern: Vec::new(),
         source_train_range: range(),
         eki_jikoku_value_range: range(),
         station_slot_names: names.iter().map(ToString::to_string).collect(),
@@ -60,7 +62,7 @@ fn extracts_active_slots_and_requires_manual_dia_for_invalid_reference_index() {
         " 日本語|English||metadata "
     );
     assert!(
-        matches!(templates, ReferenceDiagramSelection::Selected(OudiaRouteTemplates { ref templates, .. }) if templates[0].active_station_slots == [0, 2] && templates[0].train_type_index == Some(2))
+        matches!(templates, ReferenceDiagramSelection::Selected(OudiaRouteTemplates { ref templates, .. }) if templates[0].active_station_slots == [0, 2] && templates[0].route_station_slots == [0, 1, 2] && templates[0].train_type_index == Some(2))
     );
     assert!(!source.document.diagrams[0].trains[0].eki_jikoku.cells[3].is_empty());
 
@@ -70,6 +72,23 @@ fn extracts_active_slots_and_requires_manual_dia_for_invalid_reference_index() {
         build_oudia_route_templates(&document),
         ReferenceDiagramSelection::NeedsSelection { candidates, .. } if candidates.len() == 1
     ));
+}
+
+#[test]
+fn reverses_station_order_for_nobori_templates() {
+    let source = parse_oudia(
+        b"FileType=OuDiaSecond.1.16\nKijunDiaIndex=0\nRosen.\nEki.\nEkimei=A\n.\nEki.\nEkimei=B\n.\nEki.\nEkimei=C\n.\n.\nDia.\nNobori.\nRessya.\nSyubetsu=0\nEkiJikoku=,1;1000,1;1003/\n.\n.\n.\n"
+            .to_vec(),
+    )
+    .unwrap();
+    let template = match build_oudia_route_templates(&source.document) {
+        ReferenceDiagramSelection::Selected(templates) => templates.templates[0].clone(),
+        _ => unreachable!(),
+    };
+
+    assert_eq!(template.route_station_slots, [1, 0]);
+    assert_eq!(template.active_station_slots, [1, 0]);
+    assert_eq!(template.station_slot_names, ["B", "A"]);
 }
 
 #[test]
@@ -181,6 +200,23 @@ fn keeps_direction_order_duplicate_context_and_partial_matches_manual() {
     assert!(
         matches!(duplicate, RouteMatchOutcome::Automatic { candidate } if candidate.station_mapping[1].oudia_slot_index == 1)
     );
+
+    let branch_duplicate = match_mtr_route(
+        &["A".to_string(), "B".to_string(), "C".to_string()],
+        &[template(
+            OudiaDirection::Kudari,
+            &[0, 1, 2, 3],
+            &["A", "B", "B", "C"],
+        )],
+        &BTreeMap::new(),
+        Some(1),
+    );
+    assert!(matches!(
+        branch_duplicate,
+        RouteMatchOutcome::Automatic { candidate }
+            if candidate.rank == RouteMatchRank::CollapsedDuplicateExact
+                && candidate.station_mapping.iter().filter(|mapping| mapping.mtr_station_index == 1).map(|mapping| mapping.oudia_slot_index).collect::<Vec<_>>() == [1, 2]
+    ));
 
     let partial = match_mtr_route(
         &["A".to_string(), "X".to_string(), "C".to_string()],

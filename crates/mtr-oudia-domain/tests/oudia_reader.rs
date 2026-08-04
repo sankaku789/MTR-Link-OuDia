@@ -48,6 +48,20 @@ fn accepts_compact_departure_and_arrival_departure_times_with_tracks() {
 }
 
 #[test]
+fn reads_oudia_second_syubetsu_as_the_train_type_index() {
+    let source = parse_oudia(
+        b"FileType=OuDiaSecond.1.16\nDia.\nKudari.\nRessya.\nSyubetsu=2\nEkiJikoku=1;1000\n.\n.\n.\n"
+            .to_vec(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        source.document.diagrams[0].trains[0].train_type_index,
+        Some(2)
+    );
+}
+
+#[test]
 fn preserves_crlf_and_multibyte_property_byte_ranges() {
     let source = parse_oudia(SIMPLE_117.to_vec()).unwrap();
     let property = source

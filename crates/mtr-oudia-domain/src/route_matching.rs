@@ -21,6 +21,8 @@ pub struct OudiaRouteTemplate {
     pub train_type_index: Option<usize>,
     pub active_station_slots: Vec<usize>,
     pub stop_pattern: Vec<OudiaStopState>,
+    pub route_station_slots: Vec<usize>,
+    pub route_stop_pattern: Vec<OudiaStopState>,
     pub source_train_range: SourceRange,
     pub eki_jikoku_value_range: SourceRange,
     /// active_station_slots と同じ順序の駅名。スロット番号は失わない。
@@ -80,15 +82,26 @@ fn templates_for_diagram(document: &OudiaDocument, diagram_index: usize) -> Oudi
         .iter()
         .enumerate()
         .map(|(train_index, train)| {
-            let active = train
+            let route_active = train
                 .eki_jikoku
                 .cells
                 .iter()
                 .enumerate()
-                .filter(|(_, cell)| {
-                    // 時刻を持たない非営業セルは、空欄と同様に経路へ補完しない。
-                    !cell.is_empty() && (cell.arrival.is_some() || cell.departure.is_some())
+                .filter(|(_, cell)| cell.is_route_active())
+                .filter_map(|(cell_index, cell)| {
+                    let station_index = match train.direction {
+                        OudiaDirection::Kudari => cell_index,
+                        OudiaDirection::Nobori => {
+                            document.station_slots.len().checked_sub(cell_index + 1)?
+                        }
+                    };
+                    Some((station_index, cell))
                 })
+                .collect::<Vec<_>>();
+            let active = route_active
+                .iter()
+                .copied()
+                .filter(|(_, cell)| cell.is_timetable_active())
                 .collect::<Vec<_>>();
             OudiaRouteTemplate {
                 diagram_index,
@@ -97,6 +110,13 @@ fn templates_for_diagram(document: &OudiaDocument, diagram_index: usize) -> Oudi
                 train_type_index: train.train_type_index,
                 active_station_slots: active.iter().map(|(index, _)| *index).collect(),
                 stop_pattern: active
+                    .iter()
+                    .map(|(_, cell)| OudiaStopState {
+                        handling_code: cell.handling_code,
+                    })
+                    .collect(),
+                route_station_slots: route_active.iter().map(|(index, _)| *index).collect(),
+                route_stop_pattern: route_active
                     .iter()
                     .map(|(_, cell)| OudiaStopState {
                         handling_code: cell.handling_code,
@@ -264,7 +284,7 @@ fn candidate_for(
     template: &OudiaRouteTemplate,
     aliases: &BTreeMap<String, String>,
 ) -> Option<RouteMatchCandidate> {
-    if mtr.len() != template.station_slot_names.len() || mtr.is_empty() {
+    if mtr.is_empty() || template.station_slot_names.is_empty() {
         return None;
     }
     let levels = mtr
@@ -272,7 +292,7 @@ fn candidate_for(
         .zip(&template.station_slot_names)
         .map(|(left, right)| name_level(left, right, aliases))
         .collect::<Vec<_>>();
-    if levels.iter().all(Option::is_some) {
+    if mtr.len() == template.station_slot_names.len() && levels.iter().all(Option::is_some) {
         let rank = levels
             .into_iter()
             .flatten()
@@ -298,12 +318,12 @@ fn candidate_for(
             .iter()
             .zip(&oudia_collapsed)
             .flat_map(|((_, mtr_indices), (_, oudia_indices))| {
-                mtr_indices
-                    .iter()
-                    .map(move |mtr_station_index| StationMapping {
+                mtr_indices.iter().flat_map(move |mtr_station_index| {
+                    oudia_indices.iter().map(move |oudia_index| StationMapping {
                         mtr_station_index: *mtr_station_index,
-                        oudia_slot_index: template.active_station_slots[oudia_indices[0]],
+                        oudia_slot_index: template.active_station_slots[*oudia_index],
                     })
+                })
             })
             .collect();
         return Some(RouteMatchCandidate {
@@ -324,7 +344,8 @@ fn candidate_for(
         .enumerate()
         .filter_map(|(index, level)| level.is_some().then_some(index))
         .collect::<Vec<_>>();
-    if mtr.len() >= 3
+    if mtr.len() == template.station_slot_names.len()
+        && mtr.len() >= 3
         && matching.first() == Some(&0)
         && matching.last() == Some(&(mtr.len() - 1))
         && matching.len() >= 2

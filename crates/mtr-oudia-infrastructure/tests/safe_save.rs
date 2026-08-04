@@ -1,6 +1,6 @@
 use std::fs;
 
-use mtr_oudia_domain::OudiaPatch;
+use mtr_oudia_domain::{ByteReplacement, ByteReplacementKind, OudiaPatch, SourceRange};
 use mtr_oudia_infrastructure::{SafeOudiaWriter, SafeSaveError};
 
 #[test]
@@ -38,7 +38,7 @@ fn saves_validated_bytes_without_overwriting_input_or_existing_output() {
 }
 
 #[test]
-fn rejects_changed_input_and_equivalent_paths() {
+fn rejects_changed_input() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("input.oud2");
     fs::write(&input, b"FileType=OuDiaSecond.1.16\n").unwrap();
@@ -54,17 +54,33 @@ fn rejects_changed_input_and_equivalent_paths() {
         ),
         Err(SafeSaveError::InputChanged)
     ));
+}
 
-    let input = directory.path().join("again.oud2");
-    fs::write(&input, b"FileType=OuDiaSecond.1.16\n").unwrap();
-    let equivalent = directory.path().join(".").join("again.oud2");
-    assert!(matches!(
-        writer.save(
-            &input,
-            equivalent,
-            writer.hash(b"FileType=OuDiaSecond.1.16\n"),
-            &OudiaPatch::new(vec![]).unwrap()
-        ),
-        Err(SafeSaveError::SamePath)
-    ));
+#[test]
+fn safely_replaces_the_original_file_after_validation() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("input.oud2");
+    let original = b"FileType=OuDiaSecond.1.16\nNote=old\n";
+    fs::write(&input, original).unwrap();
+    let writer = SafeOudiaWriter::new();
+    let start = original
+        .windows(3)
+        .position(|bytes| bytes == b"old")
+        .unwrap();
+    let patch = OudiaPatch::new(vec![ByteReplacement {
+        range: SourceRange::new(start, start + 3).unwrap(),
+        expected: b"old".to_vec(),
+        replacement: b"new".to_vec(),
+        kind: ByteReplacementKind::Time,
+    }])
+    .unwrap();
+
+    writer
+        .save(&input, &input, writer.hash(original), &patch)
+        .unwrap();
+
+    assert_eq!(
+        fs::read(&input).unwrap(),
+        b"FileType=OuDiaSecond.1.16\nNote=new\n"
+    );
 }

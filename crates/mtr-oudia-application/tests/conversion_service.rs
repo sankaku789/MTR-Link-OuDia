@@ -10,7 +10,7 @@ use mtr_oudia_domain::{
 };
 use std::{collections::BTreeMap, path::Path, sync::Mutex};
 
-const OUDIA: &str = "FileType=OuDiaSecond.1.16\nKijunDiaIndex=0\nRosen.\nEki.\nEkimei=A\n.\nEki.\nEkimei=B\n.\n.\nDia.\nKudari.\nRessya.\nRessyasyubetsu=1\nEkiJikoku=1;/10:00:00,1;10:01:00/\n.\n.\n.\n";
+const OUDIA: &str = "FileType=OuDiaSecond.1.16\nKijunDiaIndex=0\nRosen.\nEki.\nEkimei=A\n.\nEki.\nEkimei=B\n.\n.\nRessyasyubetsu.\nSyubetsumei=普通\n.\nRessyasyubetsu.\nSyubetsumei=快速\n.\nDia.\nKudari.\nRessya.\nRessyasyubetsu=1\nEkiJikoku=1;/10:00:00,1;10:01:00/\n.\n.\n.\n";
 
 #[tokio::test]
 async fn display_dtos_include_normalized_route_and_oudia_metadata() {
@@ -50,7 +50,13 @@ async fn display_dtos_include_normalized_route_and_oudia_metadata() {
         .unwrap();
     assert_eq!(inspection.line_name, None);
     assert_eq!(inspection.station_count, 2);
+    assert_eq!(inspection.train_type_names, ["普通", "快速"]);
     assert_eq!(inspection.templates[0].active_station_slots[0].name, "A");
+    assert_eq!(inspection.templates[0].route_station_slots.len(), 2);
+    assert_eq!(
+        inspection.templates[0].active_station_slots[0].handling_code,
+        Some(1)
+    );
     assert_eq!(
         serde_json::to_value(&inspection).unwrap()["station_count"],
         2
@@ -155,6 +161,18 @@ impl OudiaRepository for NoMatchRepository {
         .unwrap())
     }
 }
+
+struct TwoTrainTypesRepository;
+impl OudiaRepository for TwoTrainTypesRepository {
+    fn read(&self, _: &Path) -> Result<mtr_oudia_domain::OudiaSource, BusinessError> {
+        Ok(parse_oudia(
+            "FileType=OuDiaSecond.1.16\nKijunDiaIndex=0\nRosen.\nEki.\nEkimei=A\n.\nEki.\nEkimei=B\n.\n.\nDia.\nKudari.\nRessya.\nSyubetsu=0\nEkiJikoku=1;1000,1;1001\n.\nRessya.\nSyubetsu=1\nEkiJikoku=1;1000,1;1001\n.\n.\n.\n"
+                .as_bytes()
+                .to_vec(),
+        )
+        .unwrap())
+    }
+}
 impl SettingsRepository for Ports {
     fn load(&self) -> Result<SettingsSnapshot, BusinessError> {
         Ok(SettingsSnapshot {
@@ -225,6 +243,38 @@ async fn happy_path_uses_session_owned_candidate_and_preview() {
         )
         .unwrap();
     assert_eq!(ports.saved.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn selected_train_type_filters_candidate_templates() {
+    let dependencies = Ports {
+        saved: Mutex::new(Vec::new()),
+    };
+    let repository = TwoTrainTypesRepository;
+    let service = ConversionService::new(
+        ConversionSessionStore::new(2),
+        &dependencies,
+        &dependencies,
+        &repository,
+        &dependencies,
+        &dependencies,
+    );
+    let session = service.create_session();
+    let endpoint = MtrEndpoint::parse("http://127.0.0.1:12345/").unwrap();
+    service
+        .fetch_mtr_snapshot(&session, &endpoint, 0)
+        .await
+        .unwrap();
+    service
+        .inspect_oudia(&session, Path::new("input.oud2"))
+        .unwrap();
+
+    let candidates = service
+        .find_route_candidates(&session, "route", None, Some(1))
+        .unwrap();
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].train_index, 1);
 }
 
 #[tokio::test]

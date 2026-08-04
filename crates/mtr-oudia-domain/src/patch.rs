@@ -153,6 +153,27 @@ pub fn build_eki_jikoku_patch(
     timetable: &GeneratedTimetable,
     operation_policy: OperationPolicy,
 ) -> Result<OudiaPatch, EkiJikokuPatchError> {
+    let station_slot_groups = template
+        .active_station_slots
+        .iter()
+        .map(|slot| vec![*slot])
+        .collect::<Vec<_>>();
+    build_eki_jikoku_patch_with_groups(
+        source,
+        template,
+        timetable,
+        &station_slot_groups,
+        operation_policy,
+    )
+}
+
+pub fn build_eki_jikoku_patch_with_groups(
+    source: &OudiaSource,
+    template: &OudiaRouteTemplate,
+    timetable: &GeneratedTimetable,
+    station_slot_groups: &[Vec<usize>],
+    operation_policy: OperationPolicy,
+) -> Result<OudiaPatch, EkiJikokuPatchError> {
     if timetable.crosses_midnight
         || timetable.stops.iter().any(|stop| {
             stop.rounded_arrival_seconds
@@ -181,37 +202,70 @@ pub fn build_eki_jikoku_patch(
         .cells
         .iter()
         .enumerate()
-        .filter(|(_, cell)| {
-            !cell.is_empty() && (cell.arrival.is_some() || cell.departure.is_some())
+        .filter(|(_, cell)| cell.is_timetable_active())
+        .filter_map(|(cell_index, cell)| {
+            let station_index = match train.direction {
+                crate::OudiaDirection::Kudari => cell_index,
+                crate::OudiaDirection::Nobori => source
+                    .document
+                    .station_slots
+                    .len()
+                    .checked_sub(cell_index + 1)?,
+            };
+            Some((station_index, cell))
         })
         .collect::<Vec<_>>();
-    if active.iter().map(|(index, _)| *index).collect::<Vec<_>>() != template.active_station_slots
-        || active.len() != timetable.stops.len()
+    if station_slot_groups.len() != timetable.stops.len()
+        || station_slot_groups
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>()
+            != template.active_station_slots
     {
         return Err(EkiJikokuPatchError::CellStructureMismatch);
     }
 
     let mut replacements = Vec::new();
-    for ((_, cell), stop) in active.into_iter().zip(&timetable.stops) {
-        if cell.is_empty() {
-            return Err(EkiJikokuPatchError::EmptyCell);
+    for (slots, stop) in station_slot_groups.iter().zip(&timetable.stops) {
+        for slot in slots {
+            let cell = active
+                .iter()
+                .find_map(|(index, cell)| (*index == *slot).then_some(*cell))
+                .ok_or(EkiJikokuPatchError::TargetNotFound)?;
+            if cell.is_empty() {
+                return Err(EkiJikokuPatchError::EmptyCell);
+            }
+            if cell.arrival.is_none() && cell.departure.is_none() {
+                add_untimed_cell_replacement(
+                    &mut replacements,
+                    cell.source_range,
+                    stop,
+                    &source.bytes,
+                )?;
+                continue;
+            }
+            let (arrival_range, departure_range) = time_ranges(&source.bytes, cell.source_range)
+                .ok_or(EkiJikokuPatchError::CellStructureMismatch)?;
+            if cell.arrival.is_some() {
+                add_time_replacement(
+                    &mut replacements,
+                    arrival_range,
+                    true,
+                    stop.rounded_arrival_display.as_deref(),
+                    &source.bytes,
+                )?;
+            }
+            if cell.departure.is_some() {
+                add_time_replacement(
+                    &mut replacements,
+                    departure_range,
+                    true,
+                    stop.rounded_departure_display.as_deref(),
+                    &source.bytes,
+                )?;
+            }
         }
-        let (arrival_range, departure_range) = time_ranges(&source.bytes, cell.source_range)
-            .ok_or(EkiJikokuPatchError::CellStructureMismatch)?;
-        add_time_replacement(
-            &mut replacements,
-            arrival_range,
-            cell.arrival.is_some(),
-            stop.rounded_arrival_display.as_deref(),
-            &source.bytes,
-        )?;
-        add_time_replacement(
-            &mut replacements,
-            departure_range,
-            cell.departure.is_some(),
-            stop.rounded_departure_display.as_deref(),
-            &source.bytes,
-        )?;
     }
     let operations = source
         .document
@@ -241,6 +295,48 @@ pub fn build_eki_jikoku_patch(
         });
     }
     OudiaPatch::new(replacements).map_err(EkiJikokuPatchError::InvalidPatch)
+}
+
+fn add_untimed_cell_replacement(
+    replacements: &mut Vec<ByteReplacement>,
+    cell: SourceRange,
+    stop: &crate::GeneratedStop,
+    bytes: &[u8],
+) -> Result<(), EkiJikokuPatchError> {
+    let arrival = stop
+        .rounded_arrival_display
+        .as_deref()
+        .map(format_compact_time)
+        .transpose()?;
+    let departure = stop
+        .rounded_departure_display
+        .as_deref()
+        .map(format_compact_time)
+        .transpose()?;
+    let payload = match (arrival, departure) {
+        (Some(arrival), Some(departure)) => format!("{arrival}/{departure}"),
+        (Some(arrival), None) => format!("{arrival}/"),
+        (None, Some(departure)) => departure,
+        (None, None) => return Err(EkiJikokuPatchError::TimeShapeMismatch),
+    };
+    let raw = &bytes[cell.start()..cell.end()];
+    let time_end = raw
+        .iter()
+        .position(|byte| *byte == b'$')
+        .unwrap_or(raw.len());
+    let (offset, replacement) = match raw[..time_end].iter().position(|byte| *byte == b';') {
+        Some(semicolon) => (semicolon + 1, payload),
+        None => (time_end, format!(";{payload}")),
+    };
+    let range = SourceRange::new(cell.start() + offset, cell.start() + offset)
+        .map_err(|_| EkiJikokuPatchError::TimeShapeMismatch)?;
+    replacements.push(ByteReplacement {
+        range,
+        expected: Vec::new(),
+        replacement: replacement.into_bytes(),
+        kind: ByteReplacementKind::Time,
+    });
+    Ok(())
 }
 
 fn add_time_replacement(
@@ -325,4 +421,27 @@ fn format_time_like_original(value: &str, original: &[u8]) -> Result<Vec<u8>, Ek
         format!("{hour:0hour_width$}{minute:02}")
     };
     Ok(formatted.into_bytes())
+}
+
+fn format_compact_time(value: &str) -> Result<String, EkiJikokuPatchError> {
+    let mut parts = value.split(':');
+    let (Some(hour), Some(minute), Some(second), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(EkiJikokuPatchError::TimeShapeMismatch);
+    };
+    let hour: u8 = hour
+        .parse()
+        .map_err(|_| EkiJikokuPatchError::TimeShapeMismatch)?;
+    let minute: u8 = minute
+        .parse()
+        .map_err(|_| EkiJikokuPatchError::TimeShapeMismatch)?;
+    let second: u8 = second
+        .parse()
+        .map_err(|_| EkiJikokuPatchError::TimeShapeMismatch)?;
+    Ok(if second == 0 {
+        format!("{hour}{minute:02}")
+    } else {
+        format!("{hour}{minute:02}{second:02}")
+    })
 }

@@ -1,4 +1,4 @@
-//! 原本を上書きせず、検証済みの OuDia 出力だけを確定する保存器。
+//! 検証済みの OuDia 出力だけを新規保存または原本置換する保存器。
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -62,10 +62,8 @@ impl SafeOudiaWriter {
     ) -> Result<(), SafeSaveError> {
         let input = input.as_ref();
         let output = output.as_ref();
-        if same_path(input, output)? {
-            return Err(SafeSaveError::SamePath);
-        }
-        if output.exists() {
+        let replace_input = same_path(input, output)?;
+        if !replace_input && output.exists() {
             return Err(SafeSaveError::OutputAlreadyExists);
         }
 
@@ -81,7 +79,11 @@ impl SafeOudiaWriter {
             SafeSaveError::Io(io::Error::other("出力先親ディレクトリがありません"))
         })?;
         let temporary = create_temp(parent)?;
-        let result = write_and_finalize(&temporary, output, &saved);
+        let result = if replace_input {
+            write_and_replace(&temporary, input, &saved, &original)
+        } else {
+            write_and_finalize(&temporary, output, &saved)
+        };
         if result.is_err() {
             let _ = fs::remove_file(&temporary);
         }
@@ -122,14 +124,7 @@ fn create_temp(parent: &Path) -> Result<PathBuf, SafeSaveError> {
 }
 
 fn write_and_finalize(temporary: &Path, output: &Path, bytes: &[u8]) -> Result<(), SafeSaveError> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .open(temporary)
-        .map_err(SafeSaveError::Io)?;
-    file.write_all(bytes).map_err(SafeSaveError::Io)?;
-    file.flush().map_err(SafeSaveError::Io)?;
-    file.sync_all().map_err(SafeSaveError::Io)?;
-    drop(file);
+    write_and_sync(temporary, bytes)?;
     // hard link は既存出力を置換しないので rename の OS 差を避けられる。
     fs::hard_link(temporary, output).map_err(|error| {
         if error.kind() == io::ErrorKind::AlreadyExists {
@@ -138,9 +133,45 @@ fn write_and_finalize(temporary: &Path, output: &Path, bytes: &[u8]) -> Result<(
             SafeSaveError::Io(error)
         }
     })?;
-    let _ = File::open(output.parent().unwrap_or_else(|| Path::new(".")))
-        .and_then(|directory| directory.sync_all());
+    sync_parent(output);
     // 確定済み出力を失敗扱いにしないため、後始末失敗は孤立tempとして扱う。
     let _ = fs::remove_file(temporary);
     Ok(())
+}
+
+fn write_and_replace(
+    temporary: &Path,
+    input: &Path,
+    bytes: &[u8],
+    original: &[u8],
+) -> Result<(), SafeSaveError> {
+    write_and_sync(temporary, bytes)?;
+    let parent = input.parent().unwrap_or_else(|| Path::new("."));
+    let backup = create_temp(parent)?;
+    write_and_sync(&backup, original)?;
+    fs::remove_file(input).map_err(SafeSaveError::Io)?;
+    if let Err(error) = fs::rename(temporary, input) {
+        let _ = fs::rename(&backup, input);
+        return Err(SafeSaveError::Io(error));
+    }
+    sync_parent(input);
+    let _ = fs::remove_file(backup);
+    Ok(())
+}
+
+fn write_and_sync(path: &Path, bytes: &[u8]) -> Result<(), SafeSaveError> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(SafeSaveError::Io)?;
+    file.write_all(bytes).map_err(SafeSaveError::Io)?;
+    file.flush().map_err(SafeSaveError::Io)?;
+    file.sync_all().map_err(SafeSaveError::Io)?;
+    Ok(())
+}
+
+fn sync_parent(path: &Path) {
+    let _ = File::open(path.parent().unwrap_or_else(|| Path::new(".")))
+        .and_then(|directory| directory.sync_all());
 }

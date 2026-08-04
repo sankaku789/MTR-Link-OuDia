@@ -154,6 +154,17 @@ impl EkiJikokuCell {
     pub fn is_empty(&self) -> bool {
         self.raw.is_empty()
     }
+
+    /// 時刻の有無にかかわらず、列車が通る駅として扱うセルかを返す。
+    pub fn is_route_active(&self) -> bool {
+        !self.is_empty()
+            && (self.handling_code.is_some() || self.arrival.is_some() || self.departure.is_some())
+    }
+
+    /// MTRの停車時刻を対応させるセルかを返す。通過セルは経路表示だけに使用する。
+    pub fn is_timetable_active(&self) -> bool {
+        self.is_route_active() && self.handling_code != Some(2)
+    }
 }
 
 /// 元バイト列を filesystem 非依存で読み込む。
@@ -306,7 +317,7 @@ pub fn parse_oudia(bytes: Vec<u8>) -> Result<OudiaSource, DomainError> {
                 document.diagrams[diagram].trains[train].eki_jikoku =
                     parse_eki_jikoku(&bytes, property.value_range, encoding)?;
             }
-            if property.key == "Ressyasyubetsu"
+            if matches!(property.key.as_str(), "Ressyasyubetsu" | "Syubetsu")
                 && let (Some(diagram), Some(train)) = (current_diagram, current_train)
             {
                 document.diagrams[diagram].trains[train].train_type_index =

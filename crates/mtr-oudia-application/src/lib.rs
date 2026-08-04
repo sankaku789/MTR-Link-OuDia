@@ -13,8 +13,8 @@ use futures_util::{StreamExt, stream};
 use mtr_oudia_domain::{
     GeneratedTimetable, KijunDiaIndex, MtrNetworkSnapshot, MtrRouteSnapshot, OperationPolicy,
     OudiaDirection, OudiaPatch, OudiaRouteTemplate, OudiaSource, ReferenceDiagramSelection,
-    RouteMatchCandidate, RouteMatchOutcome, build_eki_jikoku_patch, build_oudia_route_templates,
-    generate_timetable, match_mtr_route,
+    RouteMatchCandidate, RouteMatchOutcome, build_eki_jikoku_patch_with_groups,
+    build_oudia_route_templates, generate_timetable, match_mtr_route,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -306,6 +306,7 @@ pub struct InspectionDto {
     pub kijun_status: String,
     pub diagrams: Vec<DiagramDto>,
     pub train_types: Vec<usize>,
+    pub train_type_names: Vec<String>,
     pub templates: Vec<TemplateDto>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -320,11 +321,13 @@ pub struct TemplateDto {
     pub train_index: usize,
     pub train_type_index: Option<usize>,
     pub active_station_slots: Vec<StationSlotDto>,
+    pub route_station_slots: Vec<StationSlotDto>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StationSlotDto {
     pub index: usize,
     pub name: String,
+    pub handling_code: Option<u8>,
     pub previous_name: Option<String>,
     pub next_name: Option<String>,
 }
@@ -403,6 +406,7 @@ struct Preview {
     revision: u64,
     template: OudiaRouteTemplate,
     timetable: GeneratedTimetable,
+    station_slot_groups: Vec<Vec<usize>>,
 }
 impl ConversionSessionStore {
     pub fn new(max: usize) -> Self {
@@ -669,7 +673,10 @@ impl<
                     "OuDia を読み込んでください",
                 )
             })?;
-            let templates = templates_for(&source.2, diagram_index)?;
+            let mut templates = templates_for(&source.2, diagram_index)?;
+            if let Some(train_type) = train_type {
+                templates.retain(|template| template.train_type_index == Some(train_type));
+            }
             let outcome = match_mtr_route(
                 &route
                     .stops
@@ -774,16 +781,41 @@ impl<
                 .map(|v| v.station_mappings)
                 .unwrap_or(candidate.mapping.clone());
             let route = selected_route(s)?;
-            if mapping.len() != route.stops.len()
-                || mapping
-                    .iter()
-                    .enumerate()
-                    .any(|(i, v)| v.mtr_station_index != i)
+            let mut station_slot_groups = vec![Vec::new(); route.stops.len()];
+            for item in mapping {
+                let Some(group) = station_slot_groups.get_mut(item.mtr_station_index) else {
+                    return Err(BusinessError::new(
+                        BusinessErrorKind::SelectionRequired,
+                        "全駅の対応を確定してください",
+                    ));
+                };
+                group.push(item.oudia_station_slot);
+            }
+            let expected_slots = candidate.template.active_station_slots.clone();
+            let mut selected_slots = station_slot_groups
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+            let mut sorted_expected = expected_slots.clone();
+            selected_slots.sort_unstable();
+            sorted_expected.sort_unstable();
+            if station_slot_groups.iter().any(Vec::is_empty)
+                || selected_slots.windows(2).any(|pair| pair[0] == pair[1])
+                || selected_slots != sorted_expected
             {
                 return Err(BusinessError::new(
                     BusinessErrorKind::SelectionRequired,
                     "全駅の対応を確定してください",
                 ));
+            }
+            let slot_positions = expected_slots
+                .iter()
+                .enumerate()
+                .map(|(position, slot)| (*slot, position))
+                .collect::<HashMap<_, _>>();
+            for group in &mut station_slot_groups {
+                group.sort_by_key(|slot| slot_positions.get(slot).copied().unwrap_or(usize::MAX));
             }
             let timetable = generate_timetable(route).map_err(domain_error)?;
             let source = &s
@@ -809,6 +841,7 @@ impl<
                     revision: s.revision,
                     template: candidate.template,
                     timetable,
+                    station_slot_groups,
                 },
             );
             Ok(dto)
@@ -853,16 +886,22 @@ impl<
                 "24 時を超える時刻は保存できません",
             ));
         }
-        let patch = build_eki_jikoku_patch(&source, &preview.template, &preview.timetable, policy)
-            .map_err(|error| {
-                #[cfg(debug_assertions)]
-                eprintln!("[OuDia] 保存計画作成失敗: {error:?}");
-                BusinessError {
-                    kind: BusinessErrorKind::SaveVerification,
-                    message: "安全な保存計画を作成できません".into(),
-                    detail: Some(error.to_string()),
-                }
-            })?;
+        let patch = build_eki_jikoku_patch_with_groups(
+            &source,
+            &preview.template,
+            &preview.timetable,
+            &preview.station_slot_groups,
+            policy,
+        )
+        .map_err(|error| {
+            #[cfg(debug_assertions)]
+            eprintln!("[OuDia] 保存計画作成失敗: {error:?}");
+            BusinessError {
+                kind: BusinessErrorKind::SaveVerification,
+                message: "安全な保存計画を作成できません".into(),
+                detail: Some(error.to_string()),
+            }
+        })?;
         self.saver.save(&input, output, hash, &patch)
     }
 }
@@ -1009,6 +1048,15 @@ fn inspection_dto(source: &OudiaSource) -> InspectionDto {
             .diagrams
             .iter()
             .flat_map(|d| d.trains.iter().filter_map(|t| t.train_type_index))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        train_type_names: source
+            .document
+            .properties
+            .iter()
+            .filter(|property| property.key == "Syubetsumei")
+            .map(|property| property.value.clone())
             .collect(),
         templates: templates
             .into_iter()
@@ -1020,7 +1068,18 @@ fn inspection_dto(source: &OudiaSource) -> InspectionDto {
                 active_station_slots: t
                     .active_station_slots
                     .iter()
-                    .map(|&index| station_slot_dto(&source.document.station_slots, index))
+                    .zip(&t.stop_pattern)
+                    .map(|(&index, stop)| {
+                        station_slot_dto(&source.document.station_slots, index, stop.handling_code)
+                    })
+                    .collect(),
+                route_station_slots: t
+                    .route_station_slots
+                    .iter()
+                    .zip(&t.route_stop_pattern)
+                    .map(|(&index, stop)| {
+                        station_slot_dto(&source.document.station_slots, index, stop.handling_code)
+                    })
                     .collect(),
             })
             .collect(),
@@ -1048,13 +1107,18 @@ fn candidate_dto(
         manual_only: false,
     }
 }
-fn station_slot_dto(slots: &[mtr_oudia_domain::OudiaStationSlot], index: usize) -> StationSlotDto {
+fn station_slot_dto(
+    slots: &[mtr_oudia_domain::OudiaStationSlot],
+    index: usize,
+    handling_code: Option<u8>,
+) -> StationSlotDto {
     StationSlotDto {
         index,
         name: slots
             .get(index)
             .map(|slot| slot.name.clone())
             .unwrap_or_default(),
+        handling_code,
         previous_name: index
             .checked_sub(1)
             .and_then(|previous| slots.get(previous))
