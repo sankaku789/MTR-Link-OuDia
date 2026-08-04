@@ -16,9 +16,27 @@ fn loopback_endpoints_build_the_fixed_api_url() {
 }
 
 #[test]
+fn accepts_explicit_http_port_80() {
+    let endpoint = MtrEndpoint::parse("http://127.0.0.1:80/").unwrap();
+
+    assert_eq!(endpoint.as_url().port_or_known_default(), Some(80));
+}
+
+#[test]
+fn accepts_implicit_http_port_80() {
+    let endpoint = MtrEndpoint::parse("http://127.0.0.1/").unwrap();
+
+    assert_eq!(endpoint.as_url().port_or_known_default(), Some(80));
+}
+
+#[test]
 fn endpoint_rejects_non_loopback_or_unsafe_url_parts() {
     for input in [
         "http://example.test:8080/",
+        "http://192.168.1.10:80/",
+        "http://10.0.0.5:8888/",
+        "http://example.com:80/",
+        "http://server.example.net/",
         "http://localhost:8080/",
         "https://127.0.0.1:8080/",
         "http://user@127.0.0.1:8080/",

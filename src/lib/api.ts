@@ -32,7 +32,13 @@ function unavailable(error: unknown): never {
   if (typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)) {
     throw new Error('Tauri デスクトップアプリで開いてください。ブラウザーでは変換を実行できません。');
   }
-  throw error;
+  if (typeof error === 'object' && error !== null && 'message' in error) {
+    const dto = error as Partial<ErrorDto>;
+    const message = typeof dto.message === 'string' ? dto.message : '処理に失敗しました';
+    const detail = typeof dto.detail === 'string' && dto.detail ? `（${dto.detail}）` : '';
+    throw new Error(`${message}${detail}`);
+  }
+  throw error instanceof Error ? error : new Error(String(error));
 }
 async function call<T>(command: string, input: object): Promise<T> {
   try { return await invoke<T>(command, { input }); } catch (error) { return unavailable(error); }

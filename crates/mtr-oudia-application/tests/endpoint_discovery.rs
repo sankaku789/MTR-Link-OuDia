@@ -1,5 +1,6 @@
 use mtr_oudia_application::{
-    ApplicationError, ListeningPortProvider, MtrApiClient, MtrEndpoint, MtrEndpointDiscovery,
+    ApplicationError, ListeningPortProvider, MinecraftLogProvider, MinecraftLogRead,
+    MinecraftLogStatus, MtrApiClient, MtrEndpoint, MtrEndpointDiscovery,
     MtrEndpointDiscoveryService, MtrSnapshotResponse, async_trait,
 };
 use mtr_oudia_domain::MtrNetworkSnapshot;
@@ -10,6 +11,14 @@ use std::sync::{Arc, Mutex};
 struct FakePortProvider {
     result: Result<Vec<u16>, ApplicationError>,
     calls: AtomicUsize,
+}
+
+struct FakeLogProvider(MinecraftLogRead);
+
+impl MinecraftLogProvider for FakeLogProvider {
+    fn read_latest_log(&self) -> MinecraftLogRead {
+        self.0.clone()
+    }
 }
 
 impl ListeningPortProvider for FakePortProvider {
@@ -140,6 +149,8 @@ async fn failed_previous_probes_only_listed_ports_with_ipv4_and_ipv6_candidates(
             attempted: 5,
             unreachable: 5,
             invalid_responses: 0,
+            timeouts: 0,
+            log_status: MinecraftLogStatus::NotConfigured,
         }
     ));
     let calls = client.calls.lock().unwrap();
@@ -153,6 +164,64 @@ async fn failed_previous_probes_only_listed_ports_with_ipv4_and_ipv6_candidates(
     ] {
         assert!(calls.contains(&endpoint.to_owned()));
     }
+}
+
+#[tokio::test]
+async fn default_http_port_probes_normalized_ipv4_and_ipv6_candidates() {
+    let provider = FakePortProvider {
+        result: Ok(vec![80]),
+        calls: AtomicUsize::new(0),
+    };
+    let client = FakeClient::with_valid(&["http://127.0.0.1/"]);
+    let service = MtrEndpointDiscoveryService::new(&provider, &client);
+
+    let result = service.detect(None).await;
+
+    assert!(
+        matches!(result, MtrEndpointDiscovery::Single(endpoint) if endpoint.as_url().as_str() == "http://127.0.0.1/")
+    );
+    let calls = client.calls.lock().unwrap();
+    assert!(calls.contains(&"http://127.0.0.1/".to_owned()));
+    assert!(calls.contains(&"http://[::1]/".to_owned()));
+}
+
+#[tokio::test]
+async fn minecraft_log_endpoint_is_probed_before_listening_ports() {
+    let provider = FakePortProvider {
+        result: Ok(vec![49000]),
+        calls: AtomicUsize::new(0),
+    };
+    let log = FakeLogProvider(MinecraftLogRead::Contents(
+        "Open the Transport System Map at http://localhost:8888".to_owned(),
+    ));
+    let client = FakeClient::with_valid(&["http://127.0.0.1:8888/"]);
+
+    let result = MtrEndpointDiscoveryService::new(&provider, &client)
+        .with_minecraft_log(&log)
+        .detect(None)
+        .await;
+
+    assert!(
+        matches!(result, MtrEndpointDiscovery::Single(endpoint) if endpoint.as_url().as_str() == "http://127.0.0.1:8888/")
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn multiplayer_fallback_supports_port_1025() {
+    let provider = FakePortProvider {
+        result: Ok(vec![1025]),
+        calls: AtomicUsize::new(0),
+    };
+    let client = FakeClient::with_valid(&["http://127.0.0.1:1025/"]);
+
+    let result = MtrEndpointDiscoveryService::new(&provider, &client)
+        .detect(None)
+        .await;
+
+    assert!(
+        matches!(result, MtrEndpointDiscovery::Single(endpoint) if endpoint.as_url().as_str() == "http://127.0.0.1:1025/")
+    );
 }
 
 #[tokio::test]
@@ -196,6 +265,8 @@ async fn invalid_json_and_unreachable_candidates_are_reported_separately() {
             attempted: 2,
             unreachable: 1,
             invalid_responses: 1,
+            timeouts: 0,
+            log_status: MinecraftLogStatus::NotConfigured,
         }
     ));
 }
@@ -211,7 +282,9 @@ async fn no_ports_and_provider_error_are_distinct() {
         MtrEndpointDiscoveryService::new(&empty_provider, &client)
             .detect(None)
             .await,
-        MtrEndpointDiscovery::NoListeningPorts
+        MtrEndpointDiscovery::NoListeningPorts {
+            log_status: MinecraftLogStatus::NotConfigured,
+        }
     );
 
     let failed_provider = FakePortProvider {
@@ -224,7 +297,7 @@ async fn no_ports_and_provider_error_are_distinct() {
         MtrEndpointDiscoveryService::new(&failed_provider, &client)
             .detect(None)
             .await,
-        MtrEndpointDiscovery::PortEnumerationFailed(_)
+        MtrEndpointDiscovery::PortEnumerationFailed { .. }
     ));
 }
 

@@ -1,5 +1,5 @@
 use mtr_oudia_application::MtrEndpoint;
-use mtr_oudia_infrastructure::parse_mtr_response;
+use mtr_oudia_infrastructure::{parse_mtr_probe, parse_mtr_response};
 
 #[cfg(not(windows))]
 use mtr_oudia_application::{ApplicationError, MtrApiClient};
@@ -30,6 +30,37 @@ fn parser_normalizes_station_and_platform_names_with_a_fixed_retrieval_time() {
     assert_eq!(route.stops[0].platform_name, "Platform 1");
     assert_eq!(route.stops[0].run_millis_to_next.unwrap().millis(), 12_345);
     assert_eq!(route.stops[1].run_millis_to_next, None);
+}
+
+#[test]
+fn endpoint_probe_accepts_mtr_envelope_that_strict_snapshot_parsing_rejects() {
+    let endpoint = MtrEndpoint::parse("http://127.0.0.1:49182/").unwrap();
+    let body = r#"{
+        "status": 200,
+        "currentTime": 1,
+        "data": {
+            "stations": [],
+            "routes": [{ "id": "broken-route" }],
+            "dimensions": []
+        }
+    }"#;
+
+    assert_eq!(parse_mtr_probe(body), Ok(()));
+    assert!(parse_mtr_response(body, &endpoint, 0, 42).is_err());
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn endpoint_probe_accepts_mtr_shaped_http_400_response() {
+    let body = r#"{"status":400,"data":{"stations":[],"routes":[]}}"#;
+    let endpoint = test_server(format!(
+        "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    ))
+    .await;
+    let client = ReqwestMtrApiClient::new().unwrap();
+
+    assert_eq!(client.probe_endpoint(&endpoint, 0).await, Ok(()));
 }
 
 #[cfg(not(windows))]

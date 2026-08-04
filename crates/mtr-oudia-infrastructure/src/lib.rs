@@ -5,9 +5,9 @@ use mtr_oudia_application::DomainPort;
 #[cfg(not(target_os = "windows"))]
 use mtr_oudia_application::ListeningPortProvider;
 use mtr_oudia_application::{
-    ApplicationError, BusinessError, BusinessErrorKind, MtrApiClient, MtrEndpoint,
-    MtrSnapshotResponse, OudiaRepository, SaveReceipt, SettingsRepository, SettingsSnapshot,
-    ValidatedSavePort, async_trait,
+    ApplicationError, BusinessError, BusinessErrorKind, MinecraftLogProvider, MinecraftLogRead,
+    MtrApiClient, MtrEndpoint, MtrSnapshotResponse, OudiaRepository, SaveReceipt,
+    SettingsRepository, SettingsSnapshot, ValidatedSavePort, async_trait,
 };
 use mtr_oudia_domain::{
     DomainLayer, MtrNetworkSnapshot, MtrRouteSnapshot, MtrStopSnapshot, ServiceTimeMillis,
@@ -15,6 +15,7 @@ use mtr_oudia_domain::{
 use serde_json::{Map, Value};
 use sha2::Digest;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub mod safe_save;
@@ -134,6 +135,93 @@ mod windows;
 /// Windows IP Helper API で待受ポートを得る Provider。
 pub struct WindowsListeningPortProvider;
 
+/// Minecraftログ候補を順に確認するadapter。カスタムランチャーのパスを先頭へ追加できる。
+pub struct FileMinecraftLogProvider {
+    paths: Vec<PathBuf>,
+    include_running_minecraft: bool,
+}
+
+impl FileMinecraftLogProvider {
+    pub fn new(paths: impl IntoIterator<Item = PathBuf>) -> Self {
+        Self {
+            paths: paths.into_iter().collect(),
+            include_running_minecraft: false,
+        }
+    }
+
+    /// Windowsで実行中Minecraftの--gameDirを、固定候補より先に確認する。
+    pub fn with_running_minecraft(mut self) -> Self {
+        self.include_running_minecraft = true;
+        self
+    }
+}
+
+impl MinecraftLogProvider for FileMinecraftLogProvider {
+    fn read_latest_log(&self) -> MinecraftLogRead {
+        let mut paths = if self.include_running_minecraft {
+            running_minecraft_log_paths()
+        } else {
+            Vec::new()
+        };
+        paths.extend(self.paths.iter().cloned());
+        for path in paths {
+            match std::fs::read_to_string(path) {
+                Ok(contents) => return MinecraftLogRead::Contents(contents),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return MinecraftLogRead::ReadFailed,
+            }
+        }
+        MinecraftLogRead::NotFound
+    }
+}
+
+/// Minecraftの起動引数から--gameDirを抽出する。値を別引数にする形式と`=`形式に対応する。
+pub fn game_dir_from_command_line(arguments: &[std::ffi::OsString]) -> Option<PathBuf> {
+    let mut arguments = arguments.iter();
+    while let Some(argument) = arguments.next() {
+        if argument == "--gameDir" {
+            return arguments
+                .next()
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from);
+        }
+        let argument = argument.to_string_lossy();
+        if let Some(path) = argument.strip_prefix("--gameDir=")
+            && !path.is_empty()
+        {
+            return Some(PathBuf::from(path));
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn running_minecraft_log_paths() -> Vec<PathBuf> {
+    let system = sysinfo::System::new_all();
+    let mut paths = system
+        .processes()
+        .values()
+        .filter(|process| {
+            let name = process.name().to_string_lossy().to_ascii_lowercase();
+            matches!(name.strip_suffix(".exe").unwrap_or(&name), "java" | "javaw")
+        })
+        .filter_map(|process| game_dir_from_command_line(process.cmd()))
+        .map(|game_dir| game_dir.join("logs").join("latest.log"))
+        .filter_map(|path| {
+            let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect::<Vec<_>>();
+    paths.sort_by(|left, right| right.0.cmp(&left.0));
+    paths.dedup_by(|left, right| left.1 == right.1);
+    paths.into_iter().map(|(_, path)| path).collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn running_minecraft_log_paths() -> Vec<PathBuf> {
+    Vec::new()
+}
+
 #[cfg(not(target_os = "windows"))]
 impl ListeningPortProvider for WindowsListeningPortProvider {
     fn listening_tcp_ports(&self) -> Result<Vec<u16>, ApplicationError> {
@@ -181,6 +269,22 @@ fn build_client(response_timeout: Duration) -> Result<reqwest::Client, Applicati
 
 #[async_trait]
 impl MtrApiClient for ReqwestMtrApiClient {
+    async fn probe_endpoint(
+        &self,
+        endpoint: &MtrEndpoint,
+        dimension: u32,
+    ) -> Result<(), ApplicationError> {
+        probe_endpoint(&self.fast_client, endpoint, dimension).await
+    }
+
+    async fn probe_endpoint_extended(
+        &self,
+        endpoint: &MtrEndpoint,
+        dimension: u32,
+    ) -> Result<(), ApplicationError> {
+        probe_endpoint(&self.extended_client, endpoint, dimension).await
+    }
+
     async fn fetch_snapshot(
         &self,
         endpoint: &MtrEndpoint,
@@ -198,21 +302,40 @@ impl MtrApiClient for ReqwestMtrApiClient {
     }
 }
 
+async fn probe_endpoint(
+    client: &reqwest::Client,
+    endpoint: &MtrEndpoint,
+    dimension: u32,
+) -> Result<(), ApplicationError> {
+    let (_, body) = fetch_response(client, endpoint, dimension).await?;
+    parse_mtr_probe(&body)
+}
+
 async fn fetch_snapshot(
     client: &reqwest::Client,
     endpoint: &MtrEndpoint,
     dimension: u32,
 ) -> Result<MtrSnapshotResponse, ApplicationError> {
+    let (status, body) = fetch_response(client, endpoint, dimension).await?;
+    if !status {
+        return Err(ApplicationError::InvalidResponse {
+            reason: "HTTP status was not successful".to_owned(),
+        });
+    }
+    parse_mtr_response(&body, endpoint, dimension, current_unix_millis()?)
+}
+
+async fn fetch_response(
+    client: &reqwest::Client,
+    endpoint: &MtrEndpoint,
+    dimension: u32,
+) -> Result<(bool, String), ApplicationError> {
     let response = client
         .get(endpoint.stations_and_routes_url(dimension))
         .send()
         .await
         .map_err(map_reqwest_error)?;
-    if !response.status().is_success() {
-        return Err(ApplicationError::InvalidResponse {
-            reason: format!("HTTP status {}", response.status()),
-        });
-    }
+    let status = response.status().is_success();
     if response
         .content_length()
         .is_some_and(|size| size > MAX_RESPONSE_BYTES as u64)
@@ -228,10 +351,24 @@ async fn fetch_snapshot(
         }
         bytes.extend_from_slice(&chunk);
     }
-    let body = std::str::from_utf8(&bytes).map_err(|_| ApplicationError::InvalidResponse {
+    let body = String::from_utf8(bytes).map_err(|_| ApplicationError::InvalidResponse {
         reason: "UTF-8 JSON ではありません".to_owned(),
     })?;
-    parse_mtr_response(body, endpoint, dimension, current_unix_millis()?)
+    Ok((status, body))
+}
+
+/// 接続先探索ではMTR共通包絡だけを確認し、路線の厳密な正規化は行わない。
+pub fn parse_mtr_probe(body: &str) -> Result<(), ApplicationError> {
+    let value: Value =
+        serde_json::from_str(body).map_err(|error| invalid_response(error.to_string()))?;
+    let envelope = object(&value, "response")?;
+    if !required(envelope, "status")?.is_number() {
+        return Err(invalid_response("status must be a number"));
+    }
+    let data = object(required(envelope, "data")?, "data")?;
+    array(required(data, "stations")?, "data.stations")?;
+    array(required(data, "routes")?, "data.routes")?;
+    Ok(())
 }
 
 /// JSON fixture と HTTP 応答を同じ規則で正規化する。

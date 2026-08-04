@@ -1,7 +1,8 @@
 use mtr_oudia_application::{
     ApplicationError, BusinessError, ConversionService, ConversionSessionStore,
-    ListeningPortProvider, MtrApiClient, MtrEndpoint, MtrSnapshotResponse, OudiaRepository,
-    SaveReceipt, SettingsRepository, SettingsSnapshot, ValidatedSavePort, async_trait,
+    ListeningPortProvider, MinecraftLogProvider, MinecraftLogRead, MtrApiClient, MtrEndpoint,
+    MtrSnapshotResponse, OudiaRepository, SaveReceipt, SettingsRepository, SettingsSnapshot,
+    ValidatedSavePort, async_trait,
 };
 use mtr_oudia_domain::{
     MtrNetworkSnapshot, MtrRouteSnapshot, MtrStopSnapshot, OperationPolicy, OudiaPatch,
@@ -257,4 +258,60 @@ async fn candidate_from_other_session_and_upstream_change_are_stale() {
         .await
         .unwrap();
     assert!(service.build_preview(&one, Some(&candidate), None).is_err());
+}
+
+struct SinglePort;
+impl ListeningPortProvider for SinglePort {
+    fn listening_tcp_ports(&self) -> Result<Vec<u16>, ApplicationError> {
+        Ok(vec![8888])
+    }
+}
+
+struct InvalidProbeClient;
+#[async_trait]
+impl MtrApiClient for InvalidProbeClient {
+    async fn fetch_snapshot(
+        &self,
+        _: &MtrEndpoint,
+        _: u32,
+    ) -> Result<MtrSnapshotResponse, ApplicationError> {
+        Err(ApplicationError::InvalidResponse {
+            reason: "not MTR".to_owned(),
+        })
+    }
+}
+
+struct MissingMinecraftLog;
+impl MinecraftLogProvider for MissingMinecraftLog {
+    fn read_latest_log(&self) -> MinecraftLogRead {
+        MinecraftLogRead::NotFound
+    }
+}
+
+#[tokio::test]
+async fn discovery_error_preserves_log_and_probe_diagnostics() {
+    let dependencies = Ports {
+        saved: Mutex::new(Vec::new()),
+    };
+    let ports = SinglePort;
+    let client = InvalidProbeClient;
+    let log = MissingMinecraftLog;
+    let service = ConversionService::new(
+        ConversionSessionStore::new(2),
+        &ports,
+        &client,
+        &dependencies,
+        &dependencies,
+        &dependencies,
+    )
+    .with_minecraft_log(&log);
+    let session = service.create_session();
+
+    let error = service.detect_mtr_endpoint(&session).await.unwrap_err();
+
+    assert_eq!(error.message, "MTR APIの応答形式が一致しません");
+    let detail = error.detail.unwrap();
+    assert!(detail.contains("Minecraftログが見つかりません"));
+    assert!(detail.contains("試行 2 件"));
+    assert!(detail.contains("応答不正 2 件"));
 }

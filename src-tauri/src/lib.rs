@@ -6,8 +6,8 @@ use mtr_oudia_application::{
 };
 use mtr_oudia_domain::OperationPolicy;
 use mtr_oudia_infrastructure::{
-    FileOudiaRepository, JsonSettingsRepository, ReqwestMtrApiClient, SafeOudiaWriter,
-    WindowsListeningPortProvider,
+    FileMinecraftLogProvider, FileOudiaRepository, JsonSettingsRepository, ReqwestMtrApiClient,
+    SafeOudiaWriter, WindowsListeningPortProvider,
 };
 use serde::{Deserialize, Serialize};
 
@@ -52,9 +52,28 @@ fn settings_path() -> std::path::PathBuf {
     base.join("MtrOudiaConverter").join("settings.json")
 }
 
+fn minecraft_log_paths() -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(path) = std::env::var_os("MTR_OUDIA_MINECRAFT_LOG") {
+        paths.push(std::path::PathBuf::from(path));
+    }
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        paths.push(
+            std::path::PathBuf::from(appdata)
+                .join(".minecraft")
+                .join("logs")
+                .join("latest.log"),
+        );
+    }
+    paths
+}
+
 fn compose_state() -> Result<AppState, String> {
     // Tauri のプロセス寿命と同じ managed state なので、adapter は一度だけ確保して参照する。
     let ports = Box::leak(Box::new(WindowsListeningPortProvider));
+    let minecraft_log = Box::leak(Box::new(
+        FileMinecraftLogProvider::new(minecraft_log_paths()).with_running_minecraft(),
+    ));
     let client = Box::leak(Box::new(
         ReqwestMtrApiClient::new().map_err(|error| error.to_string())?,
     ));
@@ -69,7 +88,8 @@ fn compose_state() -> Result<AppState, String> {
             repository,
             settings,
             saver,
-        ),
+        )
+        .with_minecraft_log(minecraft_log),
     })
 }
 

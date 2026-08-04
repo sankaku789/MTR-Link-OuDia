@@ -58,7 +58,7 @@ impl MtrEndpoint {
             || url.fragment().is_some()
             || url.query().is_some()
             || (!url.path().is_empty() && url.path() != "/")
-            || url.port().is_none()
+            || url.port_or_known_default().is_none()
         {
             return Err(ApplicationError::InvalidEndpoint {
                 reason: "許可されない URL です",
@@ -94,6 +94,26 @@ pub struct MtrSnapshotResponse {
 }
 #[async_trait]
 pub trait MtrApiClient: Send + Sync {
+    /// MTR API の共通包絡だけを確認する接続先探索用 probe。
+    async fn probe_endpoint(
+        &self,
+        endpoint: &MtrEndpoint,
+        dimension: u32,
+    ) -> Result<(), ApplicationError> {
+        self.fetch_snapshot(endpoint, dimension).await.map(|_| ())
+    }
+
+    /// 通常探索で timeout した localhost API だけに使う長時間 probe。
+    async fn probe_endpoint_extended(
+        &self,
+        endpoint: &MtrEndpoint,
+        dimension: u32,
+    ) -> Result<(), ApplicationError> {
+        self.fetch_snapshot_extended(endpoint, dimension)
+            .await
+            .map(|_| ())
+    }
+
     async fn fetch_snapshot(
         &self,
         endpoint: &MtrEndpoint,
@@ -111,6 +131,66 @@ pub trait MtrApiClient: Send + Sync {
 }
 pub trait ListeningPortProvider: Send + Sync {
     fn listening_tcp_ports(&self) -> Result<Vec<u16>, ApplicationError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MinecraftLogRead {
+    NotFound,
+    ReadFailed,
+    Contents(String),
+}
+
+pub trait MinecraftLogProvider: Send + Sync {
+    fn read_latest_log(&self) -> MinecraftLogRead;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MinecraftLogStatus {
+    NotConfigured,
+    NotFound,
+    NoEndpoint,
+    InvalidEndpoint,
+    ReadFailed,
+    CandidateRejected,
+}
+
+/// Minecraftログの対象メッセージから、手動入力では許可しないlocalhostをliteral loopbackへ変換する。
+pub fn endpoint_from_minecraft_log(log: &str) -> Result<Option<MtrEndpoint>, ApplicationError> {
+    const MARKER: &str = "Open the Transport System Map at ";
+    let mut latest = None;
+    let mut matched = false;
+    for line in log.lines() {
+        let Some((_, suffix)) = line.split_once(MARKER) else {
+            continue;
+        };
+        matched = true;
+        let Some(candidate) = suffix.split_whitespace().next() else {
+            continue;
+        };
+        let Ok(url) = Url::parse(candidate) else {
+            continue;
+        };
+        if url.scheme() != "http"
+            || url.host_str() != Some("localhost")
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || (!url.path().is_empty() && url.path() != "/")
+        {
+            continue;
+        }
+        let Some(port) = url.port_or_known_default() else {
+            continue;
+        };
+        latest = Some(MtrEndpoint::parse(&format!("http://127.0.0.1:{port}/"))?);
+    }
+    if matched && latest.is_none() {
+        return Err(ApplicationError::InvalidEndpoint {
+            reason: "MinecraftログのMTR API URLが不正です",
+        });
+    }
+    Ok(latest)
 }
 pub trait OudiaRepository: Send + Sync {
     fn read(&self, location: &Path) -> Result<OudiaSource, BusinessError>;
@@ -415,6 +495,7 @@ pub struct ConversionService<'a, P: ?Sized, C: ?Sized, R: ?Sized, S: ?Sized, V: 
     repository: &'a R,
     settings: &'a S,
     saver: &'a V,
+    minecraft_log: Option<&'a dyn MinecraftLogProvider>,
 }
 impl<
     'a,
@@ -440,7 +521,12 @@ impl<
             repository,
             settings,
             saver,
+            minecraft_log: None,
         }
+    }
+    pub fn with_minecraft_log(mut self, provider: &'a dyn MinecraftLogProvider) -> Self {
+        self.minecraft_log = Some(provider);
+        self
     }
     pub fn create_session(&self) -> SessionId {
         self.store.create("session".into())
@@ -457,23 +543,48 @@ impl<
             .load()?
             .last_endpoint
             .and_then(|v| MtrEndpoint::parse(&v).ok());
-        let result = MtrEndpointDiscoveryService::new(self.ports, self.client)
-            .detect(previous)
-            .await;
+        let mut discovery = MtrEndpointDiscoveryService::new(self.ports, self.client);
+        if let Some(provider) = self.minecraft_log {
+            discovery = discovery.with_minecraft_log(provider);
+        }
+        let result = discovery.detect(previous).await;
         let endpoints = match result {
             MtrEndpointDiscovery::Single(e) => vec![e],
             MtrEndpointDiscovery::Multiple(v) => v,
-            MtrEndpointDiscovery::NoListeningPorts
-            | MtrEndpointDiscovery::NoValidEndpoints { .. } => {
-                return Err(BusinessError::new(
-                    BusinessErrorKind::NoEndpoints,
-                    "MTR API が見つかりません",
+            MtrEndpointDiscovery::NoListeningPorts { log_status } => {
+                return Err(discovery_error(
+                    "待受ポートが見つかりません",
+                    log_status,
+                    None,
                 ));
             }
-            MtrEndpointDiscovery::PortEnumerationFailed(_) => {
-                return Err(BusinessError::new(
-                    BusinessErrorKind::Connection,
+            MtrEndpointDiscovery::NoValidEndpoints {
+                attempted,
+                unreachable,
+                invalid_responses,
+                timeouts,
+                log_status,
+            } => {
+                let message = if invalid_responses > 0 && unreachable == 0 {
+                    "MTR APIの応答形式が一致しません"
+                } else if timeouts > 0 && unreachable == timeouts {
+                    "MTR APIの応答がタイムアウトしました"
+                } else {
+                    "MTR候補へ接続できません"
+                };
+                return Err(discovery_error(
+                    message,
+                    log_status,
+                    Some(format!(
+                        "試行 {attempted} 件、到達不能 {unreachable} 件（タイムアウト {timeouts} 件）、応答不正 {invalid_responses} 件"
+                    )),
+                ));
+            }
+            MtrEndpointDiscovery::PortEnumerationFailed { log_status, .. } => {
+                return Err(discovery_error(
                     "待受ポートを取得できません",
+                    log_status,
+                    None,
                 ));
             }
         };
@@ -997,26 +1108,65 @@ fn domain_error(_: impl std::fmt::Display) -> BusinessError {
     BusinessError::new(BusinessErrorKind::Validation, "時刻表を生成できません")
 }
 fn map_application_error(e: ApplicationError) -> BusinessError {
-    BusinessError::new(
-        match e {
-            ApplicationError::Timeout | ApplicationError::Transport { .. } => {
-                BusinessErrorKind::Connection
-            }
-            ApplicationError::InvalidEndpoint { .. } => BusinessErrorKind::Validation,
-            _ => BusinessErrorKind::ParseUnsupported,
-        },
-        "MTR API を取得できません",
-    )
+    let (kind, message) = match e {
+        ApplicationError::Timeout => (
+            BusinessErrorKind::Connection,
+            "MTR APIの応答がタイムアウトしました",
+        ),
+        ApplicationError::Transport { .. } => {
+            (BusinessErrorKind::Connection, "MTR APIへ接続できません")
+        }
+        ApplicationError::InvalidEndpoint { .. } => {
+            (BusinessErrorKind::Validation, "接続先URLが不正です")
+        }
+        _ => (
+            BusinessErrorKind::ParseUnsupported,
+            "MTR APIの応答形式が一致しません",
+        ),
+    };
+    BusinessError::new(kind, message)
+}
+
+fn discovery_error(
+    message: &str,
+    log_status: MinecraftLogStatus,
+    counts: Option<String>,
+) -> BusinessError {
+    let log = match log_status {
+        MinecraftLogStatus::NotConfigured => None,
+        MinecraftLogStatus::NotFound => Some("Minecraftログが見つかりません"),
+        MinecraftLogStatus::NoEndpoint => Some("ログ内にMTR API URLがありません"),
+        MinecraftLogStatus::InvalidEndpoint => Some("ログ内の接続先URLが不正です"),
+        MinecraftLogStatus::ReadFailed => Some("Minecraftログを読み取れません"),
+        MinecraftLogStatus::CandidateRejected => Some("ログ内のMTR APIへ接続できません"),
+    };
+    let detail = match (log, counts) {
+        (Some(log), Some(counts)) => Some(format!("{log}。{counts}")),
+        (Some(log), None) => Some(log.to_owned()),
+        (None, counts) => counts,
+    };
+    BusinessError {
+        kind: BusinessErrorKind::NoEndpoints,
+        message: message.to_owned(),
+        detail,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MtrEndpointDiscovery {
-    NoListeningPorts,
-    PortEnumerationFailed(ApplicationError),
+    NoListeningPorts {
+        log_status: MinecraftLogStatus,
+    },
+    PortEnumerationFailed {
+        error: ApplicationError,
+        log_status: MinecraftLogStatus,
+    },
     NoValidEndpoints {
         attempted: usize,
         unreachable: usize,
         invalid_responses: usize,
+        timeouts: usize,
+        log_status: MinecraftLogStatus,
     },
     Single(MtrEndpoint),
     Multiple(Vec<MtrEndpoint>),
@@ -1024,32 +1174,74 @@ pub enum MtrEndpointDiscovery {
 pub struct MtrEndpointDiscoveryService<'a, P: ?Sized, C: ?Sized> {
     ports: &'a P,
     client: &'a C,
+    minecraft_log: Option<&'a dyn MinecraftLogProvider>,
 }
 impl<'a, P: ListeningPortProvider + ?Sized, C: MtrApiClient + ?Sized>
     MtrEndpointDiscoveryService<'a, P, C>
 {
     pub fn new(ports: &'a P, client: &'a C) -> Self {
-        Self { ports, client }
+        Self {
+            ports,
+            client,
+            minecraft_log: None,
+        }
+    }
+    pub fn with_minecraft_log(mut self, provider: &'a dyn MinecraftLogProvider) -> Self {
+        self.minecraft_log = Some(provider);
+        self
     }
     pub async fn detect(&self, previous: Option<MtrEndpoint>) -> MtrEndpointDiscovery {
         let mut attempted = 0;
         let mut unreachable = 0;
         let mut invalid = 0;
+        let mut timeouts = 0;
         let mut seen = std::collections::HashSet::new();
         let mut previous_timeout = None;
         if let Some(e) = previous {
             attempted += 1;
-            match self.client.fetch_snapshot(&e, 0).await {
+            match self.client.probe_endpoint(&e, 0).await {
                 Ok(_) => return MtrEndpointDiscovery::Single(e),
-                Err(ApplicationError::Timeout) => previous_timeout = Some(e.clone()),
+                Err(ApplicationError::Timeout) => {
+                    timeouts += 1;
+                    previous_timeout = Some(e.clone());
+                }
                 Err(ApplicationError::Transport { .. }) => unreachable += 1,
                 Err(_) => invalid += 1,
             }
             seen.insert(e.as_url().to_string());
         }
+        let mut log_status = MinecraftLogStatus::NotConfigured;
+        let mut log_timeout = None;
+        if let Some(provider) = self.minecraft_log {
+            match provider.read_latest_log() {
+                MinecraftLogRead::NotFound => log_status = MinecraftLogStatus::NotFound,
+                MinecraftLogRead::ReadFailed => log_status = MinecraftLogStatus::ReadFailed,
+                MinecraftLogRead::Contents(log) => match endpoint_from_minecraft_log(&log) {
+                    Ok(Some(endpoint)) => {
+                        if seen.insert(endpoint.as_url().to_string()) {
+                            attempted += 1;
+                            match self.client.probe_endpoint(&endpoint, 0).await {
+                                Ok(()) => return MtrEndpointDiscovery::Single(endpoint),
+                                Err(ApplicationError::Timeout) => {
+                                    timeouts += 1;
+                                    log_timeout = Some(endpoint);
+                                }
+                                Err(ApplicationError::Transport { .. }) => unreachable += 1,
+                                Err(_) => invalid += 1,
+                            }
+                        }
+                        log_status = MinecraftLogStatus::CandidateRejected;
+                    }
+                    Ok(None) => log_status = MinecraftLogStatus::NoEndpoint,
+                    Err(_) => log_status = MinecraftLogStatus::InvalidEndpoint,
+                },
+            }
+        }
         let ports = match self.ports.listening_tcp_ports() {
             Ok(v) => v,
-            Err(e) => return MtrEndpointDiscovery::PortEnumerationFailed(e),
+            Err(error) => {
+                return MtrEndpointDiscovery::PortEnumerationFailed { error, log_status };
+            }
         };
         let endpoints: Vec<_> = ports
             .into_iter()
@@ -1060,15 +1252,15 @@ impl<'a, P: ListeningPortProvider + ?Sized, C: MtrApiClient + ?Sized>
                     format!("http://[::1]:{p}/"),
                 ]
             })
-            .map(|v| MtrEndpoint::parse(&v).expect("loopback"))
+            .filter_map(|v| MtrEndpoint::parse(&v).ok())
             .filter(|v| seen.insert(v.as_url().to_string()))
             .collect();
         if endpoints.is_empty() && attempted == 0 {
-            return MtrEndpointDiscovery::NoListeningPorts;
+            return MtrEndpointDiscovery::NoListeningPorts { log_status };
         }
         let result = stream::iter(endpoints)
             .map(|e| async move {
-                let r = self.client.fetch_snapshot(&e, 0).await;
+                let r = self.client.probe_endpoint(&e, 0).await;
                 (e, r)
             })
             .buffer_unordered(16)
@@ -1080,7 +1272,10 @@ impl<'a, P: ListeningPortProvider + ?Sized, C: MtrApiClient + ?Sized>
             attempted += 1;
             match r {
                 Ok(_) => valid.push(e),
-                Err(ApplicationError::Timeout) => timed_out.push(e),
+                Err(ApplicationError::Timeout) => {
+                    timeouts += 1;
+                    timed_out.push(e);
+                }
                 Err(ApplicationError::Transport { .. }) => unreachable += 1,
                 Err(_) => invalid += 1,
             }
@@ -1089,12 +1284,15 @@ impl<'a, P: ListeningPortProvider + ?Sized, C: MtrApiClient + ?Sized>
         if let Some(e) = previous_timeout {
             timed_out.insert(0, e);
         }
+        if let Some(e) = log_timeout {
+            timed_out.insert(0, e);
+        }
         let mut extended = timed_out.into_iter();
         let retry = extended.by_ref().take(16).collect::<Vec<_>>();
         unreachable += extended.count();
         let result = stream::iter(retry)
             .map(|e| async move {
-                let r = self.client.fetch_snapshot_extended(&e, 0).await;
+                let r = self.client.probe_endpoint_extended(&e, 0).await;
                 (e, r)
             })
             .buffer_unordered(16)
@@ -1116,6 +1314,8 @@ impl<'a, P: ListeningPortProvider + ?Sized, C: MtrApiClient + ?Sized>
                 attempted,
                 unreachable,
                 invalid_responses: invalid,
+                timeouts,
+                log_status,
             },
             1 => MtrEndpointDiscovery::Single(valid.pop().unwrap()),
             _ => MtrEndpointDiscovery::Multiple(valid),
