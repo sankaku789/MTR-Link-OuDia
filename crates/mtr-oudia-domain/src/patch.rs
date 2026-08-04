@@ -247,7 +247,7 @@ pub fn build_eki_jikoku_patch_with_groups(
             }
             let (arrival_range, departure_range) = time_ranges(&source.bytes, cell.source_range)
                 .ok_or(EkiJikokuPatchError::CellStructureMismatch)?;
-            if cell.arrival.is_some() && stop.rounded_arrival_display.is_some() {
+            if cell.arrival.is_some() {
                 add_time_replacement(
                     &mut replacements,
                     arrival_range,
@@ -256,7 +256,7 @@ pub fn build_eki_jikoku_patch_with_groups(
                     &source.bytes,
                 )?;
             }
-            if cell.departure.is_some() && stop.rounded_departure_display.is_some() {
+            if cell.departure.is_some() {
                 add_time_replacement(
                     &mut replacements,
                     departure_range,
@@ -346,17 +346,24 @@ fn add_time_replacement(
     value: Option<&str>,
     bytes: &[u8],
 ) -> Result<(), EkiJikokuPatchError> {
-    if exists != value.is_some() {
-        return Err(EkiJikokuPatchError::TimeShapeMismatch);
-    }
-    if let Some(value) = value {
-        let expected = &bytes[range.start()..range.end()];
-        replacements.push(ByteReplacement {
+    match (exists, value) {
+        (true, Some(value)) => {
+            let expected = &bytes[range.start()..range.end()];
+            replacements.push(ByteReplacement {
+                range,
+                expected: expected.to_vec(),
+                replacement: format_time_like_original(value, expected)?,
+                kind: ByteReplacementKind::Time,
+            });
+        }
+        (true, None) => replacements.push(ByteReplacement {
             range,
-            expected: expected.to_vec(),
-            replacement: format_time_like_original(value, expected)?,
+            expected: bytes[range.start()..range.end()].to_vec(),
+            replacement: Vec::new(),
             kind: ByteReplacementKind::Time,
-        });
+        }),
+        (false, None) => {}
+        (false, Some(_)) => return Err(EkiJikokuPatchError::TimeShapeMismatch),
     }
     Ok(())
 }
