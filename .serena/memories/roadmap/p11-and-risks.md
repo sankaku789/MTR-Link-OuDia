@@ -1,0 +1,8 @@
+# P11–P13 roadmap and risks
+
+- Next phase is P11 compatibility evidence, not new guessed format support. Test OuDiaSecond 1.16 and 1.17 in the real application round trip; cover every supported `EkiJikoku` form, overnight/24h+ representations, `Shinkyu.oud2`, Operation target range, unknown extra attributes/byte preservation, MTR 4.x JSON fixtures, and Windows multiple-client/multiple-candidate endpoint behavior. Record each item as supported, unsupported, or pending.
+- Until official OuDiaSecond fixture/app evidence establishes 24h+ representation, preview may show values over 24h but saving must reject them. Unknown or unproven forms must stop safely without modifying the source.
+- P12 follows P11: Windows 10/11 x64 release build/installer, clean-machine install/start/API detection/save test, settings migration policy and user documentation. P13 is later Linux support: platform port enumeration, XDG settings, WebKitGTK compatibility and distribution; keep Windows-specific code behind cfg and avoid changing Domain/Application logic.
+- P01–P10 completion does not mean formal release/acceptance completion. Design doc release criteria still require real compatibility evidence, byte-preserving save verification, post-save reparsing, dynamic localhost detection and GUI usability/error evidence.
+- Implementation review has not been performed; project instructions explicitly defer it until the user requests review.
+- Reference contracts: `mem:architecture/safety-contracts`; phase history: `mem:implementation/p01-p10-history`.

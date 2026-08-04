@@ -1,0 +1,8 @@
+# Development commands and testing
+
+- Desktop start (Windows PowerShell, project root): `npm install` then `npm run tauri dev`; Tauri config runs the Vite frontend as its before-dev command. Browser-only `npm run dev` is for UI inspection only and cannot perform the operational conversion/file flow.
+- Standard Rust checks: `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets --all-features -- -D warnings`; `cargo test --workspace`. Frontend: `npm run check`; production frontend build: `npm run build`. CI also runs Windows `cargo build --workspace` and `cargo test --workspace`.
+- WSL/Linux local limitation: full workspace/Tauri checks may fail when Tauri GTK/WebKit/DBus development libraries are absent. Validate the three Rust core layers locally where possible; rely on Linux CI (with Tauri build dependencies installed) and Windows CI for workspace/desktop confirmation.
+- Latest reported verification: 48 Rust tests; clippy clean; Svelte check reports 0 errors and 0 warnings; frontend build succeeds; CI Linux and Windows jobs succeed (run `30861144402`).
+- Development policy from `AGENTS.md`: TDD (write tests first), implement by phase, test after each phase, then commit and push; split implementation agents by phase; do not perform implementation review until the user explicitly requests it. The current project instruction says implementation review remains pending.
+- Durable context: `mem:implementation/p01-p10-history` records phase commits; `mem:architecture/safety-contracts` records invariants that tests must preserve.

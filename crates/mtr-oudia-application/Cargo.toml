@@ -1,0 +1,15 @@
+[package]
+name = "mtr-oudia-application"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+async-trait = "0.1"
+futures-util = "0.3"
+mtr-oudia-domain = { path = "../mtr-oudia-domain" }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

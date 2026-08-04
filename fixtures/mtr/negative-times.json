@@ -1,0 +1,1 @@
+{"status": 200, "currentTime": 1, "data": {"stations": [{"id":"a","name":"A"},{"id":"b","name":"B"}], "routes": [{"id":"r","name":"R","stations":[{"id":"a","name":"1","dwellTime":-1},{"id":"b","name":"2","dwellTime":0}],"durations":[-1]}], "dimensions": []}}

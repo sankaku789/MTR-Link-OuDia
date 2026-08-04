@@ -1,0 +1,39 @@
+{
+  "stations": [
+    {
+      "id": "station-a",
+      "name": "Central Station",
+      "color": 255,
+      "zone1": 0,
+      "zone2": 0,
+      "zone3": 0,
+      "connections": []
+    },
+    {
+      "id": "station-b",
+      "name": "West Station",
+      "color": 255,
+      "zone1": 0,
+      "zone2": 0,
+      "zone3": 0
+    }
+  ],
+  "routes": [
+    {
+      "id": "route-1",
+      "name": "Blue Line",
+      "color": 255,
+      "number": "1",
+      "type": "TRAIN",
+      "circularState": "NONE",
+      "hidden": false,
+      "stations": [
+        { "id": "station-a", "x": 0, "y": 64, "z": 0, "name": "Platform 1", "dwellTime": 0 },
+        { "id": "station-b", "x": 100, "y": 64, "z": 0, "name": "Platform 2", "dwellTime": 5000 }
+      ],
+      "durations": [12345],
+      "depots": []
+    }
+  ],
+  "dimensions": ["minecraft:overworld"]
+}

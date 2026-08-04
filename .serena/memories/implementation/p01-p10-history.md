@@ -1,0 +1,8 @@
+# P01–P10 implementation history
+
+- P01–P10 are implemented; each phase was tested, committed and pushed to `future/std` in phase-sized commits. This is implementation completion, not formal release completion.
+- Commit history supplied/verified for the phases: P01 `1670750`, `25b2bf6`; P02 `4f058ee`; P03 `9685153`, `ec51733`; P04 `cfa9a46`; P05 `cacf10a`, `8399f27`, `755d72e`; P06 `76b1ab6`; P07 `f4d75bb`, `32e148e`; P08 `6d634c4`; P09 `89fc530`; P10 `a9182a8`, `9e9801d`, `f43ee96`.
+- Latest implementation commit: `f43ee96`. GitHub Actions CI run `30861144402` succeeded; CI covers Linux fmt/clippy/test/npm check/build and Windows workspace build/test.
+- Phase scope: P01 workspace/quality gates; P02 domain value types and errors; P03 lossless OuDia read/model; P04 fixed-base timetable generation; P05 MTR API/JSON normalization and manual endpoint use case; P06 route templates, station normalization and candidate matching; P07 Windows LISTEN-port discovery with bounded probes; P08 SourceRange patch and safe save; P09 application use-case/session integration and business errors; P10 Tauri/Svelte Steps 1–9, DTOs, dialogs, candidate/manual mapping, preview, Operation choice and save UI.
+- Major implementation files: domain `src/lib.rs`, `timetable.rs`, `oudia.rs`, `route_matching.rs`, `patch.rs`; application `src/lib.rs`; infrastructure `src/lib.rs`, `safe_save.rs`, `windows.rs`; desktop `src-tauri/src/lib.rs`; frontend `src/routes/+page.svelte`, `src/lib/api.ts`; CI `.github/workflows/ci.yml`.
+- Do not infer from the phase commits that P11 compatibility, P12 distribution, or formal acceptance has passed; see `mem:roadmap/p11-and-risks`.

@@ -1,0 +1,8 @@
+# Project overview
+
+- Purpose: Tauri/Svelte desktop app that fetches MTR API route/station/dwell/run durations, generates an OuDiaSecond `.oud2` reference train timetable from fixed 10:00:00, and applies lossless byte-range updates.
+- Layout: root SvelteKit frontend (`src/routes/+page.svelte`, `src/lib/api.ts`); Rust workspace members `crates/mtr-oudia-domain`, `crates/mtr-oudia-application`, `crates/mtr-oudia-infrastructure`, `src-tauri` (the repository intentionally uses `src-tauri`, not design-doc `desktop/`).
+- Dependency direction: domain is pure and owns time, route/station-slot, OuDia parse/model, matching, patch rules; application owns use cases, ports, DTO-independent business errors, sessions and stale-state checks; infrastructure implements HTTP/filesystem/settings/OS ports and safe save; src-tauri composes DI and exposes thin commands/GUI integration. No Tauri/HTTP/filesystem/OS dependency in domain; GUI does not duplicate parsing or time calculation.
+- Main modules: domain `timetable.rs`, `oudia.rs`, `route_matching.rs`, `patch.rs`; application `lib.rs` (`ConversionService`, endpoint discovery, snapshot/inspection/candidate/preview/save); infrastructure `lib.rs`, `safe_save.rs`, Windows `GetExtendedTcpTable`; Tauri commands are detect, snapshot, inspect, candidates, preview, save.
+- GUI implements design-doc Steps 1–9: endpoint/dimension/route selection, OuDia inspection, candidate/manual station mapping, fixed-base preview, Operation policy, and output selection/save; browser-only `npm run dev` is not an operational conversion path.
+- Related durable notes: `mem:implementation/p01-p10-history`, `mem:architecture/safety-contracts`, `mem:development/commands-and-testing`, `mem:roadmap/p11-and-risks`.

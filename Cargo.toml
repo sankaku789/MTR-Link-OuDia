@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mtr-oudia-domain",
+    "crates/mtr-oudia-application",
+    "crates/mtr-oudia-infrastructure",
+    "src-tauri",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"

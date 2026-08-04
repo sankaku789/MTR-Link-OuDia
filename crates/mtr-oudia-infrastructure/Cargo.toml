@@ -1,0 +1,21 @@
+[package]
+name = "mtr-oudia-infrastructure"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+futures-util = "0.3"
+mtr-oudia-application = { path = "../mtr-oudia-application" }
+mtr-oudia-domain = { path = "../mtr-oudia-domain" }
+reqwest = { version = "0.13", default-features = false, features = ["stream"] }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = ["Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
+sysinfo = "0.39.6"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt"] }
+tempfile = "3"

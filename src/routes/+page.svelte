@@ -1,156 +1,67 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { open } from '@tauri-apps/plugin-dialog';
+  import { onMount } from 'svelte';
+  import { api, type Candidate, type Inspection, type Preview, type Route, type SaveReceipt, type Snapshot } from '$lib/api';
 
-  let name = $state("");
-  let greetMsg = $state("");
-
-  async function greet(event: Event) {
-    event.preventDefault();
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    greetMsg = await invoke("greet", { name });
+  let sessionId = $state<string>(); let endpoint = $state(''); let dimension = $state(0);
+  let snapshot = $state<Snapshot>(); let route = $state<Route>(); let oudiaPath = $state(''); let inspection = $state<Inspection>();
+  let diagramIndex = $state<number>(); let trainType = $state<number>(); let candidates = $state<Candidate[]>([]); let candidate = $state<Candidate>();
+  let manualMode = $state(false); let manualSlots = $state<number[][]>([]);
+  let preview = $state<Preview>(); let policy = $state('preserve'); let receipt = $state<SaveReceipt>();
+  let busy = $state(''); let error = $state(''); let generation = 0;
+  let autoDetectionSupported = $state(false);
+  onMount(async () => { try { autoDetectionSupported = await api.autoDetectionSupported(); } catch { autoDetectionSupported = false; } });
+  const dimText = (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value);
+  const milliseconds = (value: number | undefined) => value === undefined ? 'なし' : `${value} ms`;
+  const selectedTemplate = () => inspection?.templates.find((item) => item.diagram_index === candidate?.diagram_index && item.train_index === candidate?.train_index);
+  const automaticCandidates = () => candidates.filter((item) => !item.manual_only);
+  const candidateTemplate = (item: Candidate) => inspection?.templates.find((template) => template.diagram_index === item.diagram_index && template.train_index === item.train_index);
+  const directionText = (direction: string) => direction === 'kudari' ? '下り' : direction === 'nobori' ? '上り' : direction;
+  const rankText = (rank: string) => ({ PrimaryExact: '完全一致', MultilingualExact: '多言語名一致', AliasExact: '別名一致', CollapsedDuplicateExact: '重複駅をまとめて一致', Partial: '部分一致' })[rank] ?? rank;
+  const trainTypeText = (index: number | undefined) => index === undefined ? '種別不明' : inspection?.train_type_names[index] || `種別 ${index}`;
+  const stopTypeText = (handlingCode: number | null | undefined) => handlingCode === 2 ? '通過' : handlingCode === 1 ? '停車' : handlingCode == null ? '時刻あり' : `取扱 ${handlingCode}`;
+  const stopSymbol = (handlingCode: number | null | undefined) => handlingCode === 2 ? '◇' : '●';
+  const candidateStations = (item: Candidate) => candidateTemplate(item)?.route_station_slots.map((slot) => `${stopSymbol(slot.handling_code)} ${slot.name || `駅スロット ${slot.index}`}（${stopTypeText(slot.handling_code)}）`).join(' → ') || '有効駅なし';
+  const selectedSlotLabel = (index: number) => { const slot = selectedTemplate()?.active_station_slots.find((item) => item.index === index); return `${index}: ${slot?.name || '記載なし'}（${stopTypeText(slot?.handling_code)}）`; };
+  function manualIssues(): string[] {
+    if (!route || !candidate) return [];
+    const slots = selectedTemplate()?.active_station_slots ?? [];
+    const values = manualSlots.flat();
+    const issues: string[] = [];
+    if (manualSlots.length !== route.station_count || manualSlots.some((value) => value.length === 0)) issues.push('すべての MTR 駅に1つ以上の OuDia スロットを選択してください。');
+    if (new Set(values).size !== values.length) issues.push('同じ OuDia スロットを複数の駅へ割り当てることはできません。');
+    if (values.length !== slots.length || slots.some((slot) => !values.includes(slot.index))) issues.push('対象列車のすべての停車スロットを割り当ててください。');
+    return issues;
   }
+  function resetFromSnapshot() { route = undefined; candidates = []; candidate = undefined; manualMode = false; manualSlots = []; preview = undefined; receipt = undefined; }
+  function resetFromRoute() { candidates = []; candidate = undefined; manualMode = false; manualSlots = []; preview = undefined; receipt = undefined; }
+  function resetFromOudia() { diagramIndex = undefined; trainType = undefined; resetFromRoute(); }
+  function chooseCandidate(item: Candidate) { candidate = item; manualMode = item.manual_only; manualSlots = route ? Array.from({ length: route.station_count }, (_, index) => item.station_mappings.filter((mapping) => mapping.mtr_station_index === index).map((mapping) => mapping.oudia_station_slot)) : []; preview = undefined; }
+  function toggleManual() { manualMode = !manualMode; if (manualMode && route) manualSlots = Array.from({ length: route.station_count }, (_, index) => candidate?.station_mappings.filter((mapping) => mapping.mtr_station_index === index).map((mapping) => mapping.oudia_station_slot) ?? []); preview = undefined; }
+  function toggleManualSlot(mtrStationIndex: number, oudiaSlot: number) { const values = manualSlots[mtrStationIndex] ?? []; manualSlots[mtrStationIndex] = values.includes(oudiaSlot) ? values.filter((value) => value !== oudiaSlot) : [...values, oudiaSlot]; manualSlots = [...manualSlots]; preview = undefined; }
+  async function task(label: string, action: () => Promise<void>) { const current = ++generation; busy = label; error = ''; try { await action(); } catch (e) { if (current === generation) error = e instanceof Error ? e.message : String(e); } finally { if (current === generation) busy = ''; } }
+  function requireDesktop(): boolean { if (typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)) { error = 'Tauri デスクトップアプリで開いてください。ブラウザーではファイルを選択できません。'; return false; } return true; }
+  async function ensureSession(): Promise<string> { if (sessionId) return sessionId; sessionId = await api.createSession(); return sessionId; }
+  function detect() { return task('MTR API を自動検出中です。', async () => { const id = await ensureSession(); const [, endpoints] = await api.detect(id); if (!endpoints.length) throw new Error('MTR APIを検出できませんでした。手動 URL を入力してください。'); endpoint = endpoints[0].url; if (endpoints.length > 1) error = `接続先候補が ${endpoints.length} 件あります。手動 URL を確認してください。`; }); }
+  function connect() { dimension = 0; return fetchSnapshot(); }
+  function fetchSnapshot() { const baseUrl = endpoint.trim(); if (!baseUrl) { error = 'API URLを入力してください。'; return; } return task('MTR スナップショットを取得中です。', async () => { const id = await ensureSession(); snapshot = await api.snapshot(id, baseUrl, dimension); endpoint = baseUrl; resetFromSnapshot(); }); }
+  async function chooseOudia() { if (!requireDesktop()) return; const selected = await open({ multiple: false, filters: [{ name: 'OuDia', extensions: ['oud2'] }] }); if (typeof selected === 'string' && sessionId) { oudiaPath = selected; await task('OuDia ファイルを解析中です。', async () => { inspection = await api.inspect(sessionId!, oudiaPath); resetFromOudia(); }); } }
+  function findCandidates() { if (!sessionId || !route || !inspection) return; task('経路候補を検索中です。', async () => { candidates = await api.candidates(sessionId!, route!.id, diagramIndex, trainType); candidate = undefined; manualMode = false; manualSlots = []; preview = undefined; }); }
+  function buildPreview() { if (!sessionId || !candidate || manualIssues().length) return; const mappings = manualMode ? manualSlots.flatMap((slots, index) => slots.map((slot) => ({ mtr_station_index: index, oudia_station_slot: slot }))) : undefined; task('時刻プレビューを生成中です。', async () => { preview = await api.preview(sessionId!, candidate!.id, mappings); policy = 'preserve'; receipt = undefined; }); }
+  function saveFile() { if (!sessionId || !preview || !oudiaPath) return; task('元の OuDia ファイルを安全に置換中です。', async () => { receipt = await api.save(sessionId!, preview!.id, oudiaPath, policy); }); }
 </script>
 
-<main class="container">
-  <h1>Welcome to Tauri + Svelte</h1>
-
-  <div class="row">
-    <a href="https://vite.dev" target="_blank">
-      <img src="/vite.svg" class="logo vite" alt="Vite Logo" />
-    </a>
-    <a href="https://tauri.app" target="_blank">
-      <img src="/tauri.svg" class="logo tauri" alt="Tauri Logo" />
-    </a>
-    <a href="https://svelte.dev" target="_blank">
-      <img src="/svelte.svg" class="logo svelte-kit" alt="SvelteKit Logo" />
-    </a>
-  </div>
-  <p>Click on the Tauri, Vite, and SvelteKit logos to learn more.</p>
-
-  <form class="row" onsubmit={greet}>
-    <input id="greet-input" placeholder="Enter a name..." bind:value={name} />
-    <button type="submit">Greet</button>
-  </form>
-  <p>{greetMsg}</p>
+<a class="skip" href="#wizard">手順へ移動</a>
+<main class="page" id="wizard" aria-busy={busy !== ''}>
+  <h1>MTR 基準時分を OuDia へ反映</h1>
+  {#if busy}<p class="notice" role="status">{busy}</p>{/if}{#if error}<p class="notice error" role="alert">エラー: {error}</p>{/if}
+  <section class="step" aria-labelledby="step1"><h2 id="step1">1. MTR 接続</h2><div class="fields"><button onclick={detect} disabled={busy !== '' || !autoDetectionSupported} title={autoDetectionSupported ? 'MTR APIを自動検出します' : 'Linuxでは自動検知を利用できません'}>自動検出</button><label>API URL <input bind:value={endpoint} inputmode="url" placeholder="http://127.0.0.1/" /></label><button onclick={connect} disabled={busy !== '' || !endpoint.trim()}>接続</button></div>{#if !autoDetectionSupported}<p class="notice warning" role="status">Linuxでは自動検知に対応していません。API URLを手動入力して接続してください。</p>{/if}{#if snapshot}<p role="status">接続先: {endpoint} / 取得路線数: {snapshot.routes.length} / API 時刻: {snapshot.api_current_time_millis} ms</p>{:else}<p class="muted">API URLにはベースURLだけを入力してください。例: http://127.0.0.1/ または http://127.0.0.1:49182/。APIパスやサブドメインは不要です。自動検出を行わなくても接続できます。</p>{/if}</section>
+  <section class="step" aria-labelledby="step2"><h2 id="step2">2. dimension 選択</h2>{#if snapshot}{#if snapshot.dimensions.length > 1}<label>dimension <select bind:value={dimension} onchange={fetchSnapshot}>{#each snapshot.dimensions as item, index}<option value={index}>{dimText(item)}</option>{/each}</select></label>{:else}<p>dimension: {snapshot.dimensions.length === 1 ? dimText(snapshot.dimensions[0]) : '取得対象外'}（1 件は自動選択）</p>{/if}{:else}<p class="muted">接続後に選択できます。</p>{/if}</section>
+  <section class="step" aria-labelledby="step3"><h2 id="step3">3. MTR 路線選択</h2>{#if snapshot}<label>路線 <select bind:value={route} onchange={resetFromRoute}><option value={undefined}>選択してください</option>{#each snapshot.routes as item}<option value={item}>{item.name}</option>{/each}</select></label>{#if route}<p>駅数: {route.station_count} / 総運転時分: {milliseconds(route.total_run_millis)} / 総停車時分: {milliseconds(route.total_dwell_millis)}</p><ol>{#each route.stations as station}<li>{station.station_name}（ホーム: {station.platform_name || '記載なし'} / 停車: {milliseconds(station.dwell_millis)} / 次駅まで: {milliseconds(station.run_millis_to_next)}）</li>{/each}</ol>{/if}{:else}<p class="muted">接続後に選択できます。</p>{/if}</section>
+  <section class="step" aria-labelledby="step4"><h2 id="step4">4. OuDia ファイル選択</h2><div class="fields"><label>OuDia ファイル <input readonly value={oudiaPath} aria-label="選択した OuDia ファイル" /></label><button onclick={chooseOudia} disabled={!sessionId || busy !== ''}>.oud2 を選択</button></div>{#if inspection}<p>路線名: {inspection.line_name || '記載なし'} / FileType: {inspection.file_type} / 基準ダイヤ: {inspection.kijun_status} / diagram 数: {inspection.diagrams.length} / 駅数: {inspection.station_count} / Lossless 解析: 成功</p>{:else if oudiaPath}<p class="notice warning" role="status">ファイルは選択されていますが、OuDia解析結果を取得できていません。</p>{/if}</section>
+  <section class="step" aria-labelledby="step5"><h2 id="step5">5. 列車種別・経路選択</h2>{#if inspection && route}<fieldset><legend>テンプレート条件</legend><div class="fields"><label>ダイヤ <select bind:value={diagramIndex} onchange={resetFromRoute}><option value={undefined}>Application に任せる</option>{#each inspection.diagrams as d}<option value={d.index}>{d.index}（列車 {d.train_count} 本）</option>{/each}</select></label><label>列車種別 <select bind:value={trainType} onchange={resetFromRoute}><option value={undefined}>すべての列車種別</option>{#each inspection.train_types as type}<option value={type}>{trainTypeText(type)}</option>{/each}</select></label><button onclick={findCandidates} disabled={busy !== ''}>経路候補を検索</button></div></fieldset>{#if candidates.length}{#if automaticCandidates().length === 0}<p class="notice warning" role="status">自動照合候補は 0 件です。下の既存列車を選択して手動駅対応を行ってください。</p>{/if}<fieldset class="candidate-list"><legend>書き換える対象列車を選択（{candidates.length} 件）</legend><p class="route-legend">● 停車　◇ 通過</p>{#each candidates as item}{@const template = candidateTemplate(item)}<label class:selected={candidate?.id === item.id} class="candidate-card"><input type="radio" name="candidate" checked={candidate?.id === item.id} onchange={() => chooseCandidate(item)} /><span class="candidate-main"><strong>{directionText(item.direction)}・{trainTypeText(template?.train_type_index)}</strong><span>{item.manual_only ? '手動対応用' : rankText(item.rank)}</span><span class="candidate-route">{candidateStations(item)}</span></span></label>{/each}</fieldset>{:else}<p class="notice warning" role="status">この条件に一致する既存列車がありません。ダイヤまたは列車種別を選択し直してください。</p>{/if}{:else if !route && !inspection}<p class="muted">MTR路線が未選択で、OuDia解析も未完了です。</p>{:else if !route}<p class="muted">手順3でMTR路線を選択してください。</p>{:else}<p class="muted">手順4のOuDia解析が完了していません。</p>{/if}</section>
+  <section class="step" aria-labelledby="step6"><h2 id="step6">6. 駅対応確認</h2>{#if candidate && route && selectedTemplate()}<p class="selected-candidate"><strong>選択中:</strong> {directionText(candidate.direction)}・{trainTypeText(selectedTemplate()?.train_type_index)} / {candidateStations(candidate)}</p><label><input type="checkbox" checked={manualMode} disabled={candidate.manual_only} onchange={toggleManual} /> 手動で修正する</label><table><thead><tr><th>MTR 駅</th><th>MTR ホーム</th><th>OuDia スロット</th></tr></thead><tbody>{#each route.stations as station, index}<tr><td>{station.station_name}</td><td>{station.platform_name || '記載なし'}</td><td>{#if manualMode}<fieldset class="slot-options"><legend>{station.station_name}に対応するスロット（複数選択可）</legend>{#each selectedTemplate()!.active_station_slots as slot}<label><input type="checkbox" checked={manualSlots[index]?.includes(slot.index) ?? false} onchange={() => toggleManualSlot(index, slot.index)} /> {stopSymbol(slot.handling_code)} {slot.name || '記載なし'}（{stopTypeText(slot.handling_code)} / 前: {slot.previous_name || 'なし'} / 後: {slot.next_name || 'なし'}）</label>{/each}</fieldset>{:else}{@const mappings = candidate.station_mappings.filter((item) => item.mtr_station_index === index)}{mappings.length ? mappings.map((mapping) => selectedSlotLabel(mapping.oudia_station_slot)).join(' / ') : '未選択'}{/if}</td></tr>{/each}</tbody></table>{#each manualIssues() as issue}<p class="notice warning" role="alert">確認が必要です: {issue}</p>{/each}<button onclick={buildPreview} disabled={busy !== '' || manualIssues().length !== 0}>全駅対応を確認してプレビューへ</button>{:else}<p class="muted">手順5で書き換える対象列車を選択してください。</p>{/if}</section>
+  <section class="step" aria-labelledby="step7"><h2 id="step7">7. 時刻プレビュー</h2>{#if preview}<p>基準始発時刻: <strong>{preview.fixed_base_time}（固定）</strong></p><div class="table"><table><thead><tr><th>駅</th><th>既存着</th><th>既存発</th><th>新着</th><th>新発</th><th>raw ms</th><th>run / dwell ms</th></tr></thead><tbody>{#each preview.stops as stop}<tr><td>{stop.station}</td><td>{stop.existing_arrival ?? '記載なし'}</td><td>{stop.existing_departure ?? '記載なし'}</td><td>{stop.rounded_arrival ?? '-'}</td><td>{stop.rounded_departure ?? '-'}</td><td>{stop.raw_arrival_millis ?? '-'} / {stop.raw_departure_millis ?? '-'}</td><td>{stop.run_millis ?? '-'} / {stop.dwell_millis}</td></tr>{/each}</tbody></table></div>{#each preview.warnings as warning}<p class="notice warning" role="alert">警告: {warning}</p>{/each}{:else}<p class="muted">駅対応を確認後に生成します。</p>{/if}</section>
+  <section class="step" aria-labelledby="step8"><h2 id="step8">8. Operation 選択</h2>{#if preview?.operation_present}<fieldset><legend>Operation 情報が存在します</legend><label><input type="radio" value="preserve" bind:group={policy} /> 元のまま保持する（意味上の整合性は保証されません）</label><label><input type="radio" value="remove_target_train" bind:group={policy} /> 対象列車から削除する</label></fieldset>{:else}<p>Operation 情報はありません。</p>{/if}</section>
+  <section class="step" aria-labelledby="step9"><h2 id="step9">9. 保存</h2><p class="notice warning" role="alert"><strong>注意:</strong> 選択した元の OuDia ファイルを直接上書きします。重要なファイルは事前にバックアップしてください。保存中は OuDia など他のアプリからファイルを編集しないでください。</p><p>上書き対象: <strong>{oudiaPath || 'OuDiaファイル未選択'}</strong></p><button onclick={saveFile} disabled={!oudiaPath || !preview || busy !== '' || !!receipt}>元ファイルを上書き保存</button><p>変更対象は対象列車の EkiJikoku 時刻部分のみです。読込後にファイルが外部変更されていた場合は上書きを拒否します。</p>{#if receipt}<p class="notice success" role="status">元ファイルを上書きしました: {receipt.output_path}（{receipt.bytes} bytes、SHA-256: {receipt.sha256}）。続けて変更する場合はOuDiaファイルを選択し直してください。</p>{/if}</section>
 </main>
-
-<style>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.svelte-kit:hover {
-  filter: drop-shadow(0 0 2em #ff3e00);
-}
-
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
-
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
-
-  a:hover {
-    color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
-}
-
-</style>
