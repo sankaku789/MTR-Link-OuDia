@@ -247,7 +247,7 @@ pub fn build_eki_jikoku_patch_with_groups(
             }
             let (arrival_range, departure_range) = time_ranges(&source.bytes, cell.source_range)
                 .ok_or(EkiJikokuPatchError::CellStructureMismatch)?;
-            if cell.arrival.is_some() {
+            if cell.arrival.is_some() && stop.rounded_arrival_display.is_some() {
                 add_time_replacement(
                     &mut replacements,
                     arrival_range,
@@ -256,7 +256,7 @@ pub fn build_eki_jikoku_patch_with_groups(
                     &source.bytes,
                 )?;
             }
-            if cell.departure.is_some() {
+            if cell.departure.is_some() && stop.rounded_departure_display.is_some() {
                 add_time_replacement(
                     &mut replacements,
                     departure_range,

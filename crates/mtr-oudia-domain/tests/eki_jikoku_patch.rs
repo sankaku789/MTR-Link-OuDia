@@ -205,6 +205,35 @@ fn expands_one_logical_branch_station_to_multiple_oudia_slots() {
 }
 
 #[test]
+fn preserves_existing_time_fields_that_have_no_generated_counterpart() {
+    let fixture = "FileType=OuDiaSecond.1.16\nKijunDiaIndex=0\nDia.\nKudari.\nRessya.\nEkiJikoku=1;0959/1000,1;1001/1002,1;1003/1004\n.\n.\n.\n";
+    let source = parse_oudia(fixture.as_bytes().to_vec()).unwrap();
+    let template = match build_oudia_route_templates(&source.document) {
+        mtr_oudia_domain::ReferenceDiagramSelection::Selected(templates) => {
+            templates.templates[0].clone()
+        }
+        _ => unreachable!(),
+    };
+    let timetable = GeneratedTimetable {
+        crosses_midnight: false,
+        stops: vec![
+            stop(0, None, Some("10:10:00")),
+            stop(1, Some("10:12:00"), Some("10:13:00")),
+            stop(2, Some("10:15:00"), None),
+        ],
+    };
+
+    let patch =
+        build_eki_jikoku_patch(&source, &template, &timetable, OperationPolicy::Preserve).unwrap();
+    let saved = patch.apply(&source.bytes).unwrap();
+
+    assert_eq!(
+        std::str::from_utf8(&saved).unwrap(),
+        "FileType=OuDiaSecond.1.16\nKijunDiaIndex=0\nDia.\nKudari.\nRessya.\nEkiJikoku=1;0959/1010,1;1012/1013,1;1015/1004\n.\n.\n.\n"
+    );
+}
+
+#[test]
 fn rejects_empty_or_mismatched_cells_and_24_hour_results() {
     let source = parse_oudia(FIXTURE.as_bytes().to_vec()).unwrap();
     let mut template = match build_oudia_route_templates(&source.document) {
