@@ -126,7 +126,21 @@ pub enum EkiJikokuPatchError {
 
 impl fmt::Display for EkiJikokuPatchError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("安全な EkiJikoku 更新計画を作成できません")
+        match self {
+            Self::TargetNotFound => formatter.write_str("対象列車が原本内に見つかりません"),
+            Self::CellStructureMismatch => {
+                formatter.write_str("対象列車の駅セル構造がプレビューと一致しません")
+            }
+            Self::EmptyCell => formatter.write_str("更新対象に空の駅セルがあります"),
+            Self::TimeShapeMismatch => {
+                formatter.write_str("既存セルと生成時刻の着発形式が一致しません")
+            }
+            Self::UnsupportedOvernightTime => {
+                formatter.write_str("24時を超える時刻は保存できません")
+            }
+            Self::AmbiguousOperation => formatter.write_str("Operation行を一意に処理できません"),
+            Self::InvalidPatch(error) => write!(formatter, "パッチ検証失敗: {error}"),
+        }
     }
 }
 
@@ -240,10 +254,11 @@ fn add_time_replacement(
         return Err(EkiJikokuPatchError::TimeShapeMismatch);
     }
     if let Some(value) = value {
+        let expected = &bytes[range.start()..range.end()];
         replacements.push(ByteReplacement {
             range,
-            expected: bytes[range.start()..range.end()].to_vec(),
-            replacement: value.as_bytes().to_vec(),
+            expected: expected.to_vec(),
+            replacement: format_time_like_original(value, expected)?,
             kind: ByteReplacementKind::Time,
         });
     }
@@ -253,16 +268,61 @@ fn add_time_replacement(
 fn time_ranges(bytes: &[u8], cell: SourceRange) -> Option<(SourceRange, SourceRange)> {
     let raw = &bytes[cell.start()..cell.end()];
     let semicolon = raw.iter().position(|byte| *byte == b';')?;
-    let slash = raw.iter().position(|byte| *byte == b'/')?;
     let time_end = raw
         .iter()
         .position(|byte| *byte == b'$')
         .unwrap_or(raw.len());
-    if semicolon >= slash || slash >= time_end {
+    let time_start = semicolon + 1;
+    if time_start > time_end {
         return None;
     }
-    Some((
-        SourceRange::new(cell.start() + semicolon + 1, cell.start() + slash).ok()?,
-        SourceRange::new(cell.start() + slash + 1, cell.start() + time_end).ok()?,
-    ))
+    if let Some(slash) = raw[time_start..time_end]
+        .iter()
+        .position(|byte| *byte == b'/')
+        .map(|position| time_start + position)
+    {
+        Some((
+            SourceRange::new(cell.start() + time_start, cell.start() + slash).ok()?,
+            SourceRange::new(cell.start() + slash + 1, cell.start() + time_end).ok()?,
+        ))
+    } else {
+        Some((
+            SourceRange::new(cell.start() + time_start, cell.start() + time_start).ok()?,
+            SourceRange::new(cell.start() + time_start, cell.start() + time_end).ok()?,
+        ))
+    }
+}
+
+fn format_time_like_original(value: &str, original: &[u8]) -> Result<Vec<u8>, EkiJikokuPatchError> {
+    if original.contains(&b':') {
+        return Ok(value.as_bytes().to_vec());
+    }
+    let mut parts = value.split(':');
+    let (Some(hour), Some(minute), Some(second), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(EkiJikokuPatchError::TimeShapeMismatch);
+    };
+    let hour: u8 = hour
+        .parse()
+        .map_err(|_| EkiJikokuPatchError::TimeShapeMismatch)?;
+    let minute: u8 = minute
+        .parse()
+        .map_err(|_| EkiJikokuPatchError::TimeShapeMismatch)?;
+    let second: u8 = second
+        .parse()
+        .map_err(|_| EkiJikokuPatchError::TimeShapeMismatch)?;
+    let (hour_width, original_has_seconds) = match original.len() {
+        3 => (1, false),
+        4 => (2, false),
+        5 => (1, true),
+        6 => (2, true),
+        _ => return Err(EkiJikokuPatchError::TimeShapeMismatch),
+    };
+    let formatted = if original_has_seconds || second != 0 {
+        format!("{hour:0hour_width$}{minute:02}{second:02}")
+    } else {
+        format!("{hour:0hour_width$}{minute:02}")
+    };
+    Ok(formatted.into_bytes())
 }

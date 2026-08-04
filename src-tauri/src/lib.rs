@@ -105,6 +105,15 @@ fn session(state: &AppState, input: SessionRequest) -> SessionId {
         .unwrap_or_else(|| state.service.create_session())
 }
 
+fn create_conversion_session_inner(state: &AppState) -> String {
+    state.service.create_session().0
+}
+
+#[tauri::command]
+fn create_conversion_session(state: tauri::State<'_, AppState>) -> String {
+    create_conversion_session_inner(&state)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotRequest {
@@ -157,6 +166,8 @@ async fn fetch_mtr_snapshot(
     state: tauri::State<'_, AppState>,
     input: SnapshotRequest,
 ) -> Result<mtr_oudia_application::SnapshotDto, ErrorDto> {
+    #[cfg(debug_assertions)]
+    eprintln!("[MTR API] 入力されたベースURL: {}", input.endpoint);
     let endpoint = MtrEndpoint::parse(&input.endpoint).map_err(|_| ErrorDto {
         kind: "Validation".into(),
         message: "接続先 URL が不正です".into(),
@@ -174,10 +185,23 @@ fn inspect_oudia(
     state: tauri::State<'_, AppState>,
     input: OudiaRequest,
 ) -> Result<mtr_oudia_application::InspectionDto, ErrorDto> {
-    state
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[OuDia] 解析開始: session_id={}, path={}",
+        input.session_id, input.path
+    );
+    let inspection = state
         .service
         .inspect_oudia(&SessionId(input.session_id), Path::new(&input.path))
-        .map_err(Into::into)
+        .map_err(ErrorDto::from)?;
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "[OuDia] 解析成功: stations={}, diagrams={}, templates={}",
+        inspection.station_count,
+        inspection.diagrams.len(),
+        inspection.templates.len()
+    );
+    Ok(inspection)
 }
 
 #[tauri::command]
@@ -245,6 +269,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
+            create_conversion_session,
             detect_mtr_endpoints,
             fetch_mtr_snapshot,
             inspect_oudia,
@@ -269,6 +294,17 @@ mod tests {
         });
         assert_eq!(dto.kind, "Io");
         assert_eq!(dto.message, "保存できません");
+    }
+
+    #[test]
+    fn create_conversion_session_returns_a_valid_unique_id() {
+        let state = compose_state().unwrap();
+
+        let first = create_conversion_session_inner(&state);
+        let second = create_conversion_session_inner(&state);
+
+        assert!(!first.is_empty());
+        assert_ne!(first, second);
     }
 
     #[test]

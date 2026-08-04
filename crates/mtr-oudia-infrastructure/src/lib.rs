@@ -72,10 +72,17 @@ impl OudiaRepository for FileOudiaRepository {
         location: &std::path::Path,
     ) -> Result<mtr_oudia_domain::OudiaSource, BusinessError> {
         let bytes = std::fs::read(location).map_err(io_business_error)?;
-        mtr_oudia_domain::parse_oudia(bytes).map_err(|_| BusinessError {
-            kind: BusinessErrorKind::ParseUnsupported,
-            message: "OuDia を解析できません".into(),
-            detail: None,
+        mtr_oudia_domain::parse_oudia(bytes).map_err(|error| {
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "[OuDia] 解析失敗: path={}, error={error:?}",
+                location.display()
+            );
+            BusinessError {
+                kind: BusinessErrorKind::ParseUnsupported,
+                message: "OuDia を解析できません".into(),
+                detail: None,
+            }
         })
     }
 }
@@ -128,6 +135,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
 const RESPONSE_TIMEOUT: Duration = Duration::from_millis(1_500);
 const EXTENDED_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+macro_rules! debug_mtr_api {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        eprintln!("[MTR API] {}", format_args!($($arg)*));
+    };
+}
 
 #[cfg(target_os = "windows")]
 mod windows;
@@ -308,7 +322,11 @@ async fn probe_endpoint(
     dimension: u32,
 ) -> Result<(), ApplicationError> {
     let (_, body) = fetch_response(client, endpoint, dimension).await?;
-    parse_mtr_probe(&body)
+    let result = parse_mtr_probe(&body);
+    if let Err(ApplicationError::InvalidResponse { reason }) = &result {
+        debug_mtr_api!("MTR形式のJSONではありません: {reason}");
+    }
+    result
 }
 
 async fn fetch_snapshot(
@@ -317,40 +335,70 @@ async fn fetch_snapshot(
     dimension: u32,
 ) -> Result<MtrSnapshotResponse, ApplicationError> {
     let (status, body) = fetch_response(client, endpoint, dimension).await?;
-    if !status {
+    if !status.is_success() {
         return Err(ApplicationError::InvalidResponse {
-            reason: "HTTP status was not successful".to_owned(),
+            reason: format!("HTTP status was not successful: {status}"),
         });
     }
-    parse_mtr_response(&body, endpoint, dimension, current_unix_millis()?)
+    let result = parse_mtr_response(&body, endpoint, dimension, current_unix_millis()?);
+    if let Err(ApplicationError::InvalidResponse { reason }) = &result {
+        debug_mtr_api!("JSON解析で失敗したフィールド: {reason}");
+    }
+    result
 }
 
 async fn fetch_response(
     client: &reqwest::Client,
     endpoint: &MtrEndpoint,
     dimension: u32,
-) -> Result<(bool, String), ApplicationError> {
+) -> Result<(reqwest::StatusCode, String), ApplicationError> {
+    let request_url = endpoint.stations_and_routes_url(dimension);
+    debug_mtr_api!(
+        "ベースURL: {}, 実際に生成したAPI URL: {}",
+        endpoint.as_url(),
+        request_url
+    );
     let response = client
-        .get(endpoint.stations_and_routes_url(dimension))
+        .get(request_url.as_str())
         .send()
         .await
-        .map_err(map_reqwest_error)?;
-    let status = response.status().is_success();
+        .map_err(|error| {
+            debug_mtr_api!(
+                "HTTP要求失敗: timeout={}, error={error}",
+                error.is_timeout()
+            );
+            map_reqwest_error(error)
+        })?;
+    let status = response.status();
+    debug_mtr_api!(
+        "HTTPステータス: {status}, Content-Length: {:?}, timeout=false",
+        response.content_length()
+    );
     if response
         .content_length()
         .is_some_and(|size| size > MAX_RESPONSE_BYTES as u64)
     {
+        debug_mtr_api!("レスポンスサイズが上限を超えています");
         return Err(ApplicationError::ResponseTooLarge);
     }
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(map_reqwest_error)?;
+        let chunk = chunk.map_err(|error| {
+            debug_mtr_api!(
+                "レスポンス読取失敗: timeout={}, bytes_received={}, error={error}",
+                error.is_timeout(),
+                bytes.len()
+            );
+            map_reqwest_error(error)
+        })?;
         if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            debug_mtr_api!("レスポンスサイズが上限を超えています");
             return Err(ApplicationError::ResponseTooLarge);
         }
         bytes.extend_from_slice(&chunk);
     }
+    debug_mtr_api!("レスポンスサイズ: {} bytes, timeout=false", bytes.len());
     let body = String::from_utf8(bytes).map_err(|_| ApplicationError::InvalidResponse {
         reason: "UTF-8 JSON ではありません".to_owned(),
     })?;
@@ -361,11 +409,15 @@ async fn fetch_response(
 pub fn parse_mtr_probe(body: &str) -> Result<(), ApplicationError> {
     let value: Value =
         serde_json::from_str(body).map_err(|error| invalid_response(error.to_string()))?;
-    let envelope = object(&value, "response")?;
-    if !required(envelope, "status")?.is_number() {
-        return Err(invalid_response("status must be a number"));
-    }
-    let data = object(required(envelope, "data")?, "data")?;
+    let root = object(&value, "response")?;
+    let data = if let Some(data) = root.get("data") {
+        if root.get("status").is_some_and(|status| !status.is_number()) {
+            return Err(invalid_response("status must be a number"));
+        }
+        object(data, "data")?
+    } else {
+        root
+    };
     array(required(data, "stations")?, "data.stations")?;
     array(required(data, "routes")?, "data.routes")?;
     Ok(())
@@ -380,12 +432,24 @@ pub fn parse_mtr_response(
 ) -> Result<MtrSnapshotResponse, ApplicationError> {
     let value: Value =
         serde_json::from_str(body).map_err(|error| invalid_response(error.to_string()))?;
-    let envelope = object(&value, "response")?;
-    if integer(required(envelope, "status")?, "status")? != 200 {
-        return Err(invalid_response("status must be 200"));
-    }
-    let current_time = integer(required(envelope, "currentTime")?, "currentTime")?;
-    let data = object(required(envelope, "data")?, "data")?;
+    let root = object(&value, "response")?;
+    let (data, current_time) = if let Some(data) = root.get("data") {
+        let current_time = match root.get("status") {
+            Some(status) => {
+                if integer(status, "status")? != 200 {
+                    return Err(invalid_response("status must be 200"));
+                }
+                integer(required(root, "currentTime")?, "currentTime")?
+            }
+            None => match root.get("currentTime") {
+                Some(current_time) => integer(current_time, "currentTime")?,
+                None => retrieved_at_unix_millis,
+            },
+        };
+        (object(data, "data")?, current_time)
+    } else {
+        (root, retrieved_at_unix_millis)
+    };
     let stations = array(required(data, "stations")?, "data.stations")?;
     let routes = array(required(data, "routes")?, "data.routes")?;
     let dimensions = array(required(data, "dimensions")?, "data.dimensions")?.clone();
@@ -408,16 +472,28 @@ pub fn parse_mtr_response(
     for route in routes {
         let route = object(route, "route")?;
         let route_id = string(required(route, "id")?, "route.id")?;
-        if !route_ids.insert(route_id) {
-            return Err(invalid_response("duplicate route id"));
-        }
         let route_name = string(required(route, "name")?, "route.name")?;
         let route_stations = array(required(route, "stations")?, "route.stations")?;
         let durations = array(required(route, "durations")?, "route.durations")?;
-        if route_stations.len() < 2 || durations.len() != route_stations.len() - 1 {
-            return Err(invalid_response(
-                "durations length must equal stations length minus one",
-            ));
+        if route_stations.len() < 2 {
+            debug_mtr_api!(
+                "変換不能な路線を除外: id={route_id}, name={route_name}, stations={}, durations={} (駅数不足)",
+                route_stations.len(),
+                durations.len()
+            );
+            continue;
+        }
+        let required_durations = route_stations.len() - 1;
+        if durations.len() < required_durations {
+            debug_mtr_api!(
+                "変換不能な路線を除外: id={route_id}, name={route_name}, stations={}, durations={} (駅間時分不足)",
+                route_stations.len(),
+                durations.len()
+            );
+            continue;
+        }
+        if !route_ids.insert(route_id) {
+            return Err(invalid_response("duplicate route id"));
         }
         let mut stops = Vec::with_capacity(route_stations.len());
         for (index, route_station) in route_stations.iter().enumerate() {
@@ -432,13 +508,14 @@ pub fn parse_mtr_response(
             let station_name = station_names
                 .get(station_id)
                 .ok_or_else(|| invalid_response("route references an unknown station id"))?;
-            let run = durations
-                .get(index)
-                .map(|duration| {
-                    ServiceTimeMillis::new(integer(duration, "route.duration")?)
-                        .map_err(|_| invalid_response("duration must not be negative"))
-                })
-                .transpose()?;
+            let run = if index < required_durations {
+                Some(
+                    ServiceTimeMillis::new(integer(&durations[index], "route.duration")?)
+                        .map_err(|_| invalid_response("duration must not be negative"))?,
+                )
+            } else {
+                None
+            };
             stops.push(
                 MtrStopSnapshot::new(station_id, station_name, platform_name, dwell, run)
                     .map_err(|error| invalid_response(error.to_string()))?,

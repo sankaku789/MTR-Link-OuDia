@@ -854,11 +854,14 @@ impl<
             ));
         }
         let patch = build_eki_jikoku_patch(&source, &preview.template, &preview.timetable, policy)
-            .map_err(|_| {
-                BusinessError::new(
-                    BusinessErrorKind::SaveVerification,
-                    "安全な保存計画を作成できません",
-                )
+            .map_err(|error| {
+                #[cfg(debug_assertions)]
+                eprintln!("[OuDia] 保存計画作成失敗: {error:?}");
+                BusinessError {
+                    kind: BusinessErrorKind::SaveVerification,
+                    message: "安全な保存計画を作成できません".into(),
+                    detail: Some(error.to_string()),
+                }
             })?;
         self.saver.save(&input, output, hash, &patch)
     }

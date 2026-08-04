@@ -43,12 +43,20 @@ function unavailable(error: unknown): never {
 async function call<T>(command: string, input: object): Promise<T> {
   try { return await invoke<T>(command, { input }); } catch (error) { return unavailable(error); }
 }
+async function callWithoutInput<T>(command: string): Promise<T> {
+  try { return await invoke<T>(command); } catch (error) { return unavailable(error); }
+}
 
 export const api = {
+  createSession: () => callWithoutInput<string>('create_conversion_session'),
   detect: (sessionId?: string) => call<[string, Endpoint[]]>('detect_mtr_endpoints', { sessionId }),
   snapshot: (sessionId: string, endpoint: string, dimension: number) =>
     call<Snapshot>('fetch_mtr_snapshot', { sessionId, endpoint, dimension }),
-  inspect: (sessionId: string, path: string) => call<Inspection>('inspect_oudia', { sessionId, path }),
+  inspect: async (sessionId: string, path: string) => {
+    const inspection = await call<Inspection | null>('inspect_oudia', { sessionId, path });
+    if (!inspection) throw new Error('OuDiaの解析結果を取得できませんでした。');
+    return inspection;
+  },
   candidates: (sessionId: string, routeId: string, diagramIndex?: number, trainType?: number) =>
     call<Candidate[]>('find_route_candidates', { sessionId, routeId, diagramIndex, trainType }),
   preview: (sessionId: string, candidateId: string, manualMappings?: { mtr_station_index: number; oudia_station_slot: number }[]) =>

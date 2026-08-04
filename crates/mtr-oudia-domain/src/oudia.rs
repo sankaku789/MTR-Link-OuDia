@@ -476,12 +476,11 @@ fn parse_cell(raw: String, source_range: SourceRange) -> Result<EkiJikokuCell, D
         None => (raw.as_str(), None),
     };
     let main = main.to_owned();
-    let Some((handling, times)) = main.split_once(';') else {
-        return Err(DomainError::UnknownEkiJikoku { raw });
+    let (handling, times) = match main.split_once(';') {
+        Some((handling, times)) if !times.contains(';') => (handling, Some(times)),
+        Some(_) => return Err(DomainError::UnknownEkiJikoku { raw }),
+        None => (main.as_str(), None),
     };
-    if times.contains(';') {
-        return Err(DomainError::UnknownEkiJikoku { raw });
-    }
     let handling_code = if handling.is_empty() {
         None
     } else {
@@ -491,17 +490,21 @@ fn parse_cell(raw: String, source_range: SourceRange) -> Result<EkiJikokuCell, D
                 .map_err(|_| DomainError::UnknownEkiJikoku { raw: raw.clone() })?,
         )
     };
-    let Some((arrival, departure)) = times.split_once('/') else {
-        return Err(DomainError::UnknownEkiJikoku { raw });
+    let (arrival, departure) = match times {
+        Some(times) => match times.split_once('/') {
+            Some((arrival, departure)) if !departure.contains('/') => {
+                (parse_time(arrival)?, parse_time(departure)?)
+            }
+            Some(_) => return Err(DomainError::UnknownEkiJikoku { raw }),
+            None => (None, parse_time(times)?),
+        },
+        None => (None, None),
     };
-    if departure.contains('/') {
-        return Err(DomainError::UnknownEkiJikoku { raw });
-    }
     Ok(EkiJikokuCell {
         raw,
         handling_code,
-        arrival: parse_time(arrival)?,
-        departure: parse_time(departure)?,
+        arrival,
+        departure,
         track_index,
         unknown_parts: Vec::new(),
         source_range,
@@ -512,10 +515,31 @@ fn parse_time(value: &str) -> Result<Option<OudiaTime>, DomainError> {
     if value.is_empty() {
         return Ok(None);
     }
-    let mut parts = value.split(':');
-    let (Some(hour), Some(minute), Some(second), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
+    let (hour, minute, second) = if value.contains(':') {
+        let mut parts = value.split(':');
+        let (Some(hour), Some(minute), Some(second), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(DomainError::UnknownEkiJikoku {
+                raw: value.to_owned(),
+            });
+        };
+        (hour, minute, second)
+    } else if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        match value.len() {
+            3 | 4 => (&value[..value.len() - 2], &value[value.len() - 2..], "0"),
+            5 | 6 => (
+                &value[..value.len() - 4],
+                &value[value.len() - 4..value.len() - 2],
+                &value[value.len() - 2..],
+            ),
+            _ => {
+                return Err(DomainError::UnknownEkiJikoku {
+                    raw: value.to_owned(),
+                });
+            }
+        }
+    } else {
         return Err(DomainError::UnknownEkiJikoku {
             raw: value.to_owned(),
         });

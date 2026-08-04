@@ -27,6 +27,18 @@ fn accepts_implicit_http_port_80() {
     let endpoint = MtrEndpoint::parse("http://127.0.0.1/").unwrap();
 
     assert_eq!(endpoint.as_url().port_or_known_default(), Some(80));
+    assert_eq!(
+        endpoint.stations_and_routes_url(0).as_str(),
+        "http://127.0.0.1/mtr/api/map/stations-and-routes?dimension=0"
+    );
+}
+
+#[test]
+fn explicit_and_implicit_http_port_80_are_the_same_endpoint() {
+    let implicit = MtrEndpoint::parse("http://127.0.0.1/").unwrap();
+    let explicit = MtrEndpoint::parse("http://127.0.0.1:80/").unwrap();
+
+    assert_eq!(implicit, explicit);
 }
 
 #[test]
@@ -41,6 +53,7 @@ fn endpoint_rejects_non_loopback_or_unsafe_url_parts() {
         "https://127.0.0.1:8080/",
         "http://user@127.0.0.1:8080/",
         "http://127.0.0.1:8080/other",
+        "http://127.0.0.1/mtr/api/map/stations-and-routes",
         "http://127.0.0.1:8080/?dimension=1",
         "http://127.0.0.1:8080/#part",
     ] {

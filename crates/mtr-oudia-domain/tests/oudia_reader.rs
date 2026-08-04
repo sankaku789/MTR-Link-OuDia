@@ -25,6 +25,29 @@ fn preserves_utf8_lf_input_bytes_and_extracts_the_reference_train() {
 }
 
 #[test]
+fn accepts_compact_departure_and_arrival_departure_times_with_tracks() {
+    let source = parse_oudia(
+        b"FileType=OuDiaSecond.1.16\nKijunDiaIndex=0\nDia.\nKudari.\nRessya.\nEkiJikoku=1;1000$4,2$1,1;100236/100253$2,1;100753/$1\n.\n.\n.\n"
+            .to_vec(),
+    )
+    .unwrap();
+    let cells = &source.document.diagrams[0].trains[0].eki_jikoku.cells;
+
+    assert_eq!(cells[0].arrival, None);
+    assert_eq!(cells[0].departure.unwrap().hour, 10);
+    assert_eq!(cells[0].departure.unwrap().minute, 0);
+    assert_eq!(cells[0].track_index, Some(4));
+    assert_eq!(cells[1].handling_code, Some(2));
+    assert_eq!(cells[1].arrival, None);
+    assert_eq!(cells[1].departure, None);
+    assert_eq!(cells[1].track_index, Some(1));
+    assert_eq!(cells[2].arrival.unwrap().second, 36);
+    assert_eq!(cells[2].departure.unwrap().second, 53);
+    assert_eq!(cells[3].arrival.unwrap().minute, 7);
+    assert_eq!(cells[3].departure, None);
+}
+
+#[test]
 fn preserves_crlf_and_multibyte_property_byte_ranges() {
     let source = parse_oudia(SIMPLE_117.to_vec()).unwrap();
     let property = source

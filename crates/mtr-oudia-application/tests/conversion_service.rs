@@ -281,6 +281,27 @@ impl MtrApiClient for InvalidProbeClient {
     }
 }
 
+struct DetectFailsButManualFetchSucceeds;
+#[async_trait]
+impl MtrApiClient for DetectFailsButManualFetchSucceeds {
+    async fn probe_endpoint(&self, _: &MtrEndpoint, _: u32) -> Result<(), ApplicationError> {
+        Err(ApplicationError::Transport {
+            message: "unreachable during detection".to_owned(),
+        })
+    }
+
+    async fn fetch_snapshot(
+        &self,
+        endpoint: &MtrEndpoint,
+        _: u32,
+    ) -> Result<MtrSnapshotResponse, ApplicationError> {
+        Ok(MtrSnapshotResponse {
+            snapshot: MtrNetworkSnapshot::new(endpoint.as_url().as_str(), 0, 0, 0, vec![]).unwrap(),
+            available_dimensions: vec![],
+        })
+    }
+}
+
 struct MissingMinecraftLog;
 impl MinecraftLogProvider for MissingMinecraftLog {
     fn read_latest_log(&self) -> MinecraftLogRead {
@@ -314,4 +335,32 @@ async fn discovery_error_preserves_log_and_probe_diagnostics() {
     assert!(detail.contains("Minecraftログが見つかりません"));
     assert!(detail.contains("試行 2 件"));
     assert!(detail.contains("応答不正 2 件"));
+}
+
+#[tokio::test]
+async fn manual_fetch_uses_the_same_session_after_detection_fails() {
+    let dependencies = Ports {
+        saved: Mutex::new(Vec::new()),
+    };
+    let ports = SinglePort;
+    let client = DetectFailsButManualFetchSucceeds;
+    let service = ConversionService::new(
+        ConversionSessionStore::new(2),
+        &ports,
+        &client,
+        &dependencies,
+        &dependencies,
+        &dependencies,
+    );
+    let session = service.create_session();
+
+    assert!(service.detect_mtr_endpoint(&session).await.is_err());
+
+    let endpoint = MtrEndpoint::parse("http://127.0.0.1/").unwrap();
+    let snapshot = service
+        .fetch_mtr_snapshot(&session, &endpoint, 0)
+        .await
+        .unwrap();
+
+    assert!(snapshot.routes.is_empty());
 }
