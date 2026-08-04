@@ -99,6 +99,15 @@ pub trait MtrApiClient: Send + Sync {
         endpoint: &MtrEndpoint,
         dimension: u32,
     ) -> Result<MtrSnapshotResponse, ApplicationError>;
+
+    /// 通常探索で timeout した localhost API だけに使う長時間取得。
+    async fn fetch_snapshot_extended(
+        &self,
+        endpoint: &MtrEndpoint,
+        dimension: u32,
+    ) -> Result<MtrSnapshotResponse, ApplicationError> {
+        self.fetch_snapshot(endpoint, dimension).await
+    }
 }
 pub trait ListeningPortProvider: Send + Sync {
     fn listening_tcp_ports(&self) -> Result<Vec<u16>, ApplicationError>;
@@ -1027,12 +1036,15 @@ impl<'a, P: ListeningPortProvider + ?Sized, C: MtrApiClient + ?Sized>
         let mut unreachable = 0;
         let mut invalid = 0;
         let mut seen = std::collections::HashSet::new();
+        let mut previous_timeout = None;
         if let Some(e) = previous {
             attempted += 1;
-            if self.client.fetch_snapshot(&e, 0).await.is_ok() {
-                return MtrEndpointDiscovery::Single(e);
+            match self.client.fetch_snapshot(&e, 0).await {
+                Ok(_) => return MtrEndpointDiscovery::Single(e),
+                Err(ApplicationError::Timeout) => previous_timeout = Some(e.clone()),
+                Err(ApplicationError::Transport { .. }) => unreachable += 1,
+                Err(_) => invalid += 1,
             }
-            unreachable += 1;
             seen.insert(e.as_url().to_string());
         }
         let ports = match self.ports.listening_tcp_ports() {
@@ -1051,16 +1063,8 @@ impl<'a, P: ListeningPortProvider + ?Sized, C: MtrApiClient + ?Sized>
             .map(|v| MtrEndpoint::parse(&v).expect("loopback"))
             .filter(|v| seen.insert(v.as_url().to_string()))
             .collect();
-        if endpoints.is_empty() {
-            return if attempted == 0 {
-                MtrEndpointDiscovery::NoListeningPorts
-            } else {
-                MtrEndpointDiscovery::NoValidEndpoints {
-                    attempted,
-                    unreachable,
-                    invalid_responses: invalid,
-                }
-            };
+        if endpoints.is_empty() && attempted == 0 {
+            return MtrEndpointDiscovery::NoListeningPorts;
         }
         let result = stream::iter(endpoints)
             .map(|e| async move {
@@ -1071,8 +1075,32 @@ impl<'a, P: ListeningPortProvider + ?Sized, C: MtrApiClient + ?Sized>
             .collect::<Vec<_>>()
             .await;
         let mut valid = Vec::new();
+        let mut timed_out = Vec::new();
         for (e, r) in result {
             attempted += 1;
+            match r {
+                Ok(_) => valid.push(e),
+                Err(ApplicationError::Timeout) => timed_out.push(e),
+                Err(ApplicationError::Transport { .. }) => unreachable += 1,
+                Err(_) => invalid += 1,
+            }
+        }
+        timed_out.sort_by(|a, b| a.as_url().as_str().cmp(b.as_url().as_str()));
+        if let Some(e) = previous_timeout {
+            timed_out.insert(0, e);
+        }
+        let mut extended = timed_out.into_iter();
+        let retry = extended.by_ref().take(16).collect::<Vec<_>>();
+        unreachable += extended.count();
+        let result = stream::iter(retry)
+            .map(|e| async move {
+                let r = self.client.fetch_snapshot_extended(&e, 0).await;
+                (e, r)
+            })
+            .buffer_unordered(16)
+            .collect::<Vec<_>>()
+            .await;
+        for (e, r) in result {
             match r {
                 Ok(_) => valid.push(e),
                 Err(ApplicationError::Timeout | ApplicationError::Transport { .. }) => {
@@ -1082,6 +1110,7 @@ impl<'a, P: ListeningPortProvider + ?Sized, C: MtrApiClient + ?Sized>
             }
         }
         valid.sort_by(|a, b| a.as_url().as_str().cmp(b.as_url().as_str()));
+        valid.dedup_by(|a, b| a.as_url() == b.as_url());
         match valid.len() {
             0 => MtrEndpointDiscovery::NoValidEndpoints {
                 attempted,

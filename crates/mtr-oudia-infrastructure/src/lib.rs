@@ -125,6 +125,7 @@ fn safe_save_business_error(error: SafeSaveError) -> BusinessError {
 
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
 const RESPONSE_TIMEOUT: Duration = Duration::from_millis(1_500);
+const EXTENDED_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 #[cfg(target_os = "windows")]
@@ -151,24 +152,31 @@ impl DomainPort for StaticDomainPort {
 
 /// reqwest を用いる MTR localhost API client。
 pub struct ReqwestMtrApiClient {
-    client: reqwest::Client,
+    fast_client: reqwest::Client,
+    extended_client: reqwest::Client,
 }
 
 impl ReqwestMtrApiClient {
     /// redirect を拒否し、MTR API 用の通信上限を設定した client を作る。
     pub fn new() -> Result<Self, ApplicationError> {
-        let client = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(RESPONSE_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            // localhost API を環境・OSの HTTP proxy に転送しない。
-            .no_proxy()
-            .build()
-            .map_err(|error| ApplicationError::Transport {
-                message: error.to_string(),
-            })?;
-        Ok(Self { client })
+        Ok(Self {
+            fast_client: build_client(RESPONSE_TIMEOUT)?,
+            extended_client: build_client(EXTENDED_RESPONSE_TIMEOUT)?,
+        })
     }
+}
+
+fn build_client(response_timeout: Duration) -> Result<reqwest::Client, ApplicationError> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(response_timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        // localhost API を環境・OSの HTTP proxy に転送しない。
+        .no_proxy()
+        .build()
+        .map_err(|error| ApplicationError::Transport {
+            message: error.to_string(),
+        })
 }
 
 #[async_trait]
@@ -178,37 +186,52 @@ impl MtrApiClient for ReqwestMtrApiClient {
         endpoint: &MtrEndpoint,
         dimension: u32,
     ) -> Result<MtrSnapshotResponse, ApplicationError> {
-        let response = self
-            .client
-            .get(endpoint.stations_and_routes_url(dimension))
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
-        if !response.status().is_success() {
-            return Err(ApplicationError::InvalidResponse {
-                reason: format!("HTTP status {}", response.status()),
-            });
-        }
-        if response
-            .content_length()
-            .is_some_and(|size| size > MAX_RESPONSE_BYTES as u64)
-        {
+        fetch_snapshot(&self.fast_client, endpoint, dimension).await
+    }
+
+    async fn fetch_snapshot_extended(
+        &self,
+        endpoint: &MtrEndpoint,
+        dimension: u32,
+    ) -> Result<MtrSnapshotResponse, ApplicationError> {
+        fetch_snapshot(&self.extended_client, endpoint, dimension).await
+    }
+}
+
+async fn fetch_snapshot(
+    client: &reqwest::Client,
+    endpoint: &MtrEndpoint,
+    dimension: u32,
+) -> Result<MtrSnapshotResponse, ApplicationError> {
+    let response = client
+        .get(endpoint.stations_and_routes_url(dimension))
+        .send()
+        .await
+        .map_err(map_reqwest_error)?;
+    if !response.status().is_success() {
+        return Err(ApplicationError::InvalidResponse {
+            reason: format!("HTTP status {}", response.status()),
+        });
+    }
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(ApplicationError::ResponseTooLarge);
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(map_reqwest_error)?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
             return Err(ApplicationError::ResponseTooLarge);
         }
-        let mut bytes = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(map_reqwest_error)?;
-            if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-                return Err(ApplicationError::ResponseTooLarge);
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        let body = std::str::from_utf8(&bytes).map_err(|_| ApplicationError::InvalidResponse {
-            reason: "UTF-8 JSON ではありません".to_owned(),
-        })?;
-        parse_mtr_response(body, endpoint, dimension, current_unix_millis()?)
+        bytes.extend_from_slice(&chunk);
     }
+    let body = std::str::from_utf8(&bytes).map_err(|_| ApplicationError::InvalidResponse {
+        reason: "UTF-8 JSON ではありません".to_owned(),
+    })?;
+    parse_mtr_response(body, endpoint, dimension, current_unix_millis()?)
 }
 
 /// JSON fixture と HTTP 応答を同じ規則で正規化する。
