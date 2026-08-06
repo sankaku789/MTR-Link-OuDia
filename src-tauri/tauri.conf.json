@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "MTR-Link-OuDia",
-  "version": "1.0.0-beta",
-  "identifier": "com.kousu.mtr-link-oudia",
+  "version": "../package.json",
+  "identifier": "com.sankaku789.mtr-link-oudia",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
