@@ -49,8 +49,8 @@ fn updates_only_existing_time_substrings_and_preserves_cell_parts() {
 }
 
 #[test]
-fn updates_compact_times_and_departure_only_cells_without_changing_their_shape() {
-    let fixture = "FileType=OuDiaSecond.1.16\nKijunDiaIndex=0\nDia.\nKudari.\nRessya.\nEkiJikoku=1;1000$4,1;100236/100253$2,1;100753/$1\n.\n.\n.\n";
+fn fills_arrival_times_for_intermediate_departure_only_cells() {
+    let fixture = "FileType=OuDiaSecond.1.16\nKijunDiaIndex=0\nDia.\nKudari.\nRessya.\nEkiJikoku=1;1000$4,1;100253$2,1;100753/$1\n.\n.\n.\n";
     let source = parse_oudia(fixture.as_bytes().to_vec()).unwrap();
     let template = match build_oudia_route_templates(&source.document) {
         mtr_oudia_domain::ReferenceDiagramSelection::Selected(templates) => {

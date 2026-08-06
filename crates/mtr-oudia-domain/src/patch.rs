@@ -255,6 +255,17 @@ pub fn build_eki_jikoku_patch_with_groups(
                     stop.rounded_arrival_display.as_deref(),
                     &source.bytes,
                 )?;
+            } else if let Some(arrival) = stop.rounded_arrival_display.as_deref()
+                && cell.departure.is_some()
+                && slots.len() == 1
+            {
+                add_missing_arrival_replacement(
+                    &mut replacements,
+                    arrival_range,
+                    departure_range,
+                    arrival,
+                    &source.bytes,
+                )?;
             }
             if cell.departure.is_some() {
                 add_time_replacement(
@@ -295,6 +306,25 @@ pub fn build_eki_jikoku_patch_with_groups(
         });
     }
     OudiaPatch::new(replacements).map_err(EkiJikokuPatchError::InvalidPatch)
+}
+
+fn add_missing_arrival_replacement(
+    replacements: &mut Vec<ByteReplacement>,
+    arrival_range: SourceRange,
+    departure_range: SourceRange,
+    arrival: &str,
+    bytes: &[u8],
+) -> Result<(), EkiJikokuPatchError> {
+    let departure = &bytes[departure_range.start()..departure_range.end()];
+    let mut replacement = format_time_like_original(arrival, departure)?;
+    replacement.push(b'/');
+    replacements.push(ByteReplacement {
+        range: arrival_range,
+        expected: Vec::new(),
+        replacement,
+        kind: ByteReplacementKind::Time,
+    });
+    Ok(())
 }
 
 fn add_untimed_cell_replacement(
