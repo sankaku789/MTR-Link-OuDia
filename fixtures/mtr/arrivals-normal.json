@@ -1,0 +1,18 @@
+{
+  "status": 200,
+  "currentTime": 1780000000000,
+  "data": {
+    "currentTime": 1780000000000,
+    "arrivals": [
+      {
+        "destination": "終点", "arrival": 1780014077000,
+        "departure": 1780014107000, "deviation": 0,
+        "realtime": false, "departureIndex": 0,
+        "isTerminating": false, "routeId": -1,
+        "routeName": "中央線", "routeNumber": "", "routeColor": 0,
+        "circularState": "NONE", "platformId": -9223372036854775808,
+        "platformName": "1", "cars": []
+      }
+    ]
+  }
+}

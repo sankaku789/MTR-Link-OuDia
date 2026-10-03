@@ -1,7 +1,10 @@
 //! Domain のユースケース境界と Port を置く Application 層。
 
 mod outbound;
-pub use outbound::{OutboundRuntimeSetting, OutboundRuntimeSource};
+pub use outbound::{
+    ArrivalDto, ArrivalsDto, OutboundRuntimeSetting, OutboundRuntimeSource, measure_arrivals,
+    measure_outbound_runtime,
+};
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
@@ -97,6 +100,16 @@ pub struct MtrSnapshotResponse {
 }
 #[async_trait]
 pub trait MtrApiClient: Send + Sync {
+    async fn fetch_arrivals(
+        &self,
+        _endpoint: &MtrEndpoint,
+        _dimension: u32,
+        _station_id: &str,
+    ) -> Result<ArrivalsDto, ApplicationError> {
+        Err(ApplicationError::InvalidResponse {
+            reason: "arrivals取得に対応していません".into(),
+        })
+    }
     /// MTR API の共通包絡だけを確認する接続先探索用 probe。
     async fn probe_endpoint(
         &self,

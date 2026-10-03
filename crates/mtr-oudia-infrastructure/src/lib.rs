@@ -18,7 +18,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod arrivals;
 pub mod safe_save;
+pub use arrivals::parse_arrivals_response;
 pub use safe_save::*;
 
 /// 設定専用の小さな JSON adapter。壊れた設定は既定値と診断へ退避する。
@@ -299,6 +301,14 @@ fn build_client(response_timeout: Duration) -> Result<reqwest::Client, Applicati
 
 #[async_trait]
 impl MtrApiClient for ReqwestMtrApiClient {
+    async fn fetch_arrivals(
+        &self,
+        endpoint: &MtrEndpoint,
+        dimension: u32,
+        station_id: &str,
+    ) -> Result<mtr_oudia_application::ArrivalsDto, ApplicationError> {
+        arrivals::fetch_arrivals(&self.fast_client, endpoint, dimension, station_id).await
+    }
     async fn probe_endpoint(
         &self,
         endpoint: &MtrEndpoint,
@@ -385,6 +395,12 @@ async fn fetch_response(
             );
             map_reqwest_error(error)
         })?;
+    read_http_response(response).await
+}
+
+async fn read_http_response(
+    response: reqwest::Response,
+) -> Result<(reqwest::StatusCode, String), ApplicationError> {
     let status = response.status();
     debug_mtr_api!(
         "HTTPステータス: {status}, Content-Length: {:?}, timeout=false",
