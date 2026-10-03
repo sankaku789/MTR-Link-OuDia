@@ -159,6 +159,10 @@ fn directional_index_is_not_fixed_to_zero_for_partial_service() {
                 "Eki.\nEkimei=路線端\n.\nEki.\nEkimei=始発",
             )
             .replace("Kudari.", &format!("{direction}."))
+            .replace(
+                "Eki.\nEkimei=終点\n.\n.\nDia.",
+                "Eki.\nEkimei=終点\n.\nEki.\nEkimei=路線端2\n.\n.\nDia.",
+            )
             .replace("EkiJikoku=1;1000,1;1002/", "EkiJikoku=,1;1000,1;1002/")
             .replace("Operation0B=3/2359$/1;2", "Operation1B=3/2359$/1;2");
         let (bytes, _, _) = apply(&text, "utf8", false, OperationPolicy::Preserve, runtime());

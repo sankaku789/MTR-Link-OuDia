@@ -11,6 +11,27 @@ use std::sync::Mutex;
 struct Client(Mutex<(String, String)>);
 #[async_trait]
 impl MtrApiClient for Client {
+    async fn fetch_arrivals(
+        &self,
+        _: &MtrEndpoint,
+        _: u32,
+        station_id: &str,
+    ) -> Result<mtr_oudia_application::ArrivalsDto, ApplicationError> {
+        assert_eq!(station_id, "0000000000000002");
+        Ok(mtr_oudia_application::ArrivalsDto {
+            current_time_millis: 1000,
+            arrivals: vec![mtr_oudia_application::ArrivalDto {
+                route_id: mtr_oudia_domain::MtrId::from_java_long(1),
+                platform_id: mtr_oudia_domain::MtrId::from_java_long(9),
+                platform_name: "1".into(),
+                arrival: 77_000,
+                departure: 107_000,
+                deviation: 0,
+                realtime: false,
+                departure_index: 0,
+            }],
+        })
+    }
     async fn fetch_snapshot(
         &self,
         endpoint: &MtrEndpoint,
@@ -106,6 +127,17 @@ async fn manual_save_and_reload_work_without_any_oudia_file() {
         .unwrap();
     assert!(status.valid);
     assert_eq!(status.setting.unwrap().runtime.millis(), 107_000);
+    let measured = new_service
+        .measure_and_save_outbound(&new_session, "0000000000000001", "00:00:00", "+00:00")
+        .await
+        .unwrap();
+    assert!(measured.valid);
+    assert_eq!(
+        measured.setting.as_ref().unwrap().source,
+        mtr_oudia_application::OutboundRuntimeSource::Measured
+    );
+    assert_eq!(measured.setting.as_ref().unwrap().runtime.millis(), 107_000);
+    assert_eq!(measured.setting.as_ref().unwrap().measured_at, 1000);
 }
 
 #[tokio::test]

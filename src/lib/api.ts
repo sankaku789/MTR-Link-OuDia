@@ -18,6 +18,7 @@ export type Candidate = {
   station_mappings: { mtr_station_index: number; oudia_station_slot: number }[];
 };
 export type Preview = {
+  outbound: { outbound_time: string; first_departure: string; duration_label: string } | null;
   id: string; fixed_base_time: string; warnings: string[]; crosses_midnight: boolean;
   operation_present: boolean; policy_choices: string[];
   stops: {
@@ -69,8 +70,8 @@ export const api = {
   },
   candidates: (sessionId: string, routeId: string, diagramIndex?: number, trainType?: number) =>
     call<Candidate[]>('find_route_candidates', { sessionId, routeId, diagramIndex, trainType }),
-  preview: (sessionId: string, candidateId: string, manualMappings?: { mtr_station_index: number; oudia_station_slot: number }[]) =>
-    call<Preview>('build_preview', { sessionId, candidateId, manualMappings: manualMappings ? { station_mappings: manualMappings } : undefined }),
+  preview: (sessionId: string, candidateId: string, manualMappings?: { mtr_station_index: number; oudia_station_slot: number }[], generateOutbound = false, policy = 'preserve') =>
+    call<Preview>('build_preview', { sessionId, candidateId, manualMappings: manualMappings ? { station_mappings: manualMappings } : undefined, generateOutbound, policy }),
   save: (sessionId: string, previewId: string, outputPath: string, policy: string) =>
     call<SaveReceipt>('save_conversion', { sessionId, previewId, outputPath, policy })
 };

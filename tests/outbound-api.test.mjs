@@ -21,3 +21,14 @@ test('measurement, manual input, and reload use independent settings commands, n
   assert.deepEqual(calls[1].arguments_.input, { sessionId: 's', routeId: 'r', depotClock: '12:00:00', utcOffset: '+09:00' });
   assert.equal(calls[2].arguments_.input.seconds, 107);
 });
+
+test('preview defaults outbound generation to OFF and transmits opt-in separately from operation policy', async () => {
+  calls.length = 0;
+  await api.preview('s', 'c');
+  assert.equal(calls[0].arguments_.input.generateOutbound, false);
+  assert.equal(calls[0].arguments_.input.policy, 'preserve');
+  await api.preview('s', 'c', undefined, true, 'remove_target_train');
+  assert.equal(calls[1].arguments_.input.generateOutbound, true);
+  assert.equal(calls[1].arguments_.input.policy, 'remove_target_train');
+  assert.equal(calls[1].command, 'build_preview');
+});

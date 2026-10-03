@@ -16,8 +16,10 @@
   let outbound = $state<OutboundStatus>();
   let outboundMode = $state<'measure' | 'manual' | undefined>();
   let depotClock = $state(''); let utcOffset = $state(''); let manualSeconds = $state<number>();
+  let generateOutbound = $state(false);
+  function invalidatePreview() { preview = undefined; receipt = undefined; }
   function chooseRoute() {
-    resetFromRoute(); outbound = undefined; outboundMode = undefined;
+    resetFromRoute(); outbound = undefined; outboundMode = undefined; generateOutbound = false; policy = 'preserve';
     if (!sessionId || !route) return;
     const id = sessionId; const routeId = route.id;
     return task('保存済み出庫時分を確認中です。', async () => { const value = await api.outboundStatus(id, routeId); if (route?.id === routeId) outbound = value; });
@@ -55,7 +57,7 @@
     if (values.length !== slots.length || slots.some((slot) => !values.includes(slot.index))) issues.push('対象列車のすべての停車スロットを割り当ててください。');
     return issues;
   }
-  function resetFromSnapshot() { route = undefined; outbound = undefined; outboundMode = undefined; candidates = []; candidate = undefined; manualMode = false; manualSlots = []; preview = undefined; receipt = undefined; }
+  function resetFromSnapshot() { route = undefined; outbound = undefined; outboundMode = undefined; generateOutbound = false; policy = 'preserve'; candidates = []; candidate = undefined; manualMode = false; manualSlots = []; preview = undefined; receipt = undefined; }
   function resetFromRoute() { candidates = []; candidate = undefined; manualMode = false; manualSlots = []; preview = undefined; receipt = undefined; }
   function resetFromOudia() { diagramIndex = undefined; trainType = undefined; resetFromRoute(); }
   function chooseCandidate(item: Candidate) { candidate = item; manualMode = item.manual_only; manualSlots = route ? Array.from({ length: route.station_count }, (_, index) => item.station_mappings.filter((mapping) => mapping.mtr_station_index === index).map((mapping) => mapping.oudia_station_slot)) : []; preview = undefined; }
@@ -70,7 +72,7 @@
   async function chooseOudia() { if (!requireDesktop()) return; const selected = await open({ multiple: false, filters: [{ name: 'OuDia', extensions: ['oud2'] }] }); if (typeof selected === 'string' && sessionId) { oudiaPath = selected; await task('OuDia ファイルを解析中です。', async () => { inspection = await api.inspect(sessionId!, oudiaPath); resetFromOudia(); }); } }
   function reloadOudia() { if (!sessionId || !oudiaPath) return; return task('同じ OuDia ファイルを再解析中です。', async () => { inspection = await api.inspect(sessionId!, oudiaPath); resetFromOudia(); }); }
   function findCandidates() { if (!sessionId || !route || !inspection) return; task('経路候補を検索中です。', async () => { candidates = await api.candidates(sessionId!, route!.id, diagramIndex, trainType); candidate = undefined; manualMode = false; manualSlots = []; preview = undefined; }); }
-  function buildPreview() { if (!sessionId || !candidate || manualIssues().length) return; const mappings = manualMode ? manualSlots.flatMap((slots, index) => slots.map((slot) => ({ mtr_station_index: index, oudia_station_slot: slot }))) : undefined; task('時刻プレビューを生成中です。', async () => { preview = await api.preview(sessionId!, candidate!.id, mappings); policy = 'preserve'; receipt = undefined; }); }
+  function buildPreview() { if (!sessionId || !candidate || manualIssues().length) return; const mappings = manualMode ? manualSlots.flatMap((slots, index) => slots.map((slot) => ({ mtr_station_index: index, oudia_station_slot: slot }))) : undefined; task('時刻プレビューを生成中です。', async () => { preview = await api.preview(sessionId!, candidate!.id, mappings, generateOutbound, policy); receipt = undefined; }); }
   function saveFile() { if (!sessionId || !preview || !oudiaPath) return; task('元の OuDia ファイルを安全に置換中です。', async () => { receipt = await api.save(sessionId!, preview!.id, oudiaPath, policy); }); }
 </script>
 
@@ -115,6 +117,27 @@
   <section class="step" aria-labelledby="step5"><h2 id="step5">5. 列車種別・経路選択</h2>{#if inspection && route}<fieldset><legend>テンプレート条件</legend><div class="fields"><label>ダイヤ <select bind:value={diagramIndex} onchange={resetFromRoute}><option value={undefined}>Application に任せる</option>{#each inspection.diagrams as d}<option value={d.index}>{d.index}（列車 {d.train_count} 本）</option>{/each}</select></label><label>列車種別 <select bind:value={trainType} onchange={resetFromRoute}><option value={undefined}>すべての列車種別</option>{#each inspection.train_types as type}<option value={type}>{trainTypeText(type)}</option>{/each}</select></label><button onclick={findCandidates} disabled={busy !== ''}>経路候補を検索</button></div></fieldset>{#if candidates.length}{#if automaticCandidates().length === 0}<p class="notice warning" role="status">自動照合候補は 0 件です。下の既存列車を選択して手動駅対応を行ってください。</p>{/if}<fieldset class="candidate-list"><legend>書き換える対象列車を選択（{candidates.length} 件）</legend><p class="route-legend">● 停車　◇ 通過</p>{#each candidates as item}{@const template = candidateTemplate(item)}<label class:selected={candidate?.id === item.id} class="candidate-card"><input type="radio" name="candidate" checked={candidate?.id === item.id} onchange={() => chooseCandidate(item)} /><span class="candidate-main"><strong>{directionText(item.direction)}・{trainTypeText(template?.train_type_index)}</strong><span>{item.manual_only ? '手動対応用' : rankText(item.rank)}</span><span class="candidate-route">{candidateStations(item)}</span></span></label>{/each}</fieldset>{:else}<p class="notice warning" role="status">この条件に一致する既存列車がありません。ダイヤまたは列車種別を選択し直してください。</p>{/if}{:else if !route && !inspection}<p class="muted">MTR路線が未選択で、OuDia解析も未完了です。</p>{:else if !route}<p class="muted">手順3でMTR路線を選択してください。</p>{:else}<p class="muted">手順4のOuDia解析が完了していません。</p>{/if}</section>
   <section class="step" aria-labelledby="step6"><h2 id="step6">6. 駅対応確認</h2>{#if candidate && route && selectedTemplate()}<p class="selected-candidate"><strong>選択中:</strong> {directionText(candidate.direction)}・{trainTypeText(selectedTemplate()?.train_type_index)} / {candidateStations(candidate)}</p><label><input type="checkbox" checked={manualMode} disabled={candidate.manual_only} onchange={toggleManual} /> 手動で修正する</label><table><thead><tr><th>MTR 駅</th><th>MTR ホーム</th><th>OuDia スロット</th></tr></thead><tbody>{#each route.stations as station, index}<tr><td>{station.station_name}</td><td>{station.platform_name || '記載なし'}</td><td>{#if manualMode}<fieldset class="slot-options"><legend>{station.station_name}に対応するスロット（複数選択可）</legend>{#each selectedTemplate()!.active_station_slots as slot}<label><input type="checkbox" checked={manualSlots[index]?.includes(slot.index) ?? false} onchange={() => toggleManualSlot(index, slot.index)} /> {stopSymbol(slot.handling_code)} {slot.name || '記載なし'}（{stopTypeText(slot.handling_code)} / 前: {slot.previous_name || 'なし'} / 後: {slot.next_name || 'なし'}）</label>{/each}</fieldset>{:else}{@const mappings = candidate.station_mappings.filter((item) => item.mtr_station_index === index)}{mappings.length ? mappings.map((mapping) => selectedSlotLabel(mapping.oudia_station_slot)).join(' / ') : '未選択'}{/if}</td></tr>{/each}</tbody></table>{#each manualIssues() as issue}<p class="notice warning" role="alert">確認が必要です: {issue}</p>{/each}<button onclick={buildPreview} disabled={busy !== '' || manualIssues().length !== 0}>全駅対応を確認してプレビューへ</button>{:else}<p class="muted">手順5で書き換える対象列車を選択してください。</p>{/if}</section>
   <section class="step" aria-labelledby="step7"><h2 id="step7">7. 時刻プレビュー</h2>{#if preview}<p>基準始発時刻: <strong>{preview.fixed_base_time}（固定）</strong></p><div class="table"><table><thead><tr><th>駅</th><th>既存着</th><th>既存発</th><th>新着</th><th>新発</th><th>raw ms</th><th>run / dwell ms</th></tr></thead><tbody>{#each preview.stops as stop}<tr><td>{stop.station}</td><td>{stop.existing_arrival ?? '記載なし'}</td><td>{stop.existing_departure ?? '記載なし'}</td><td>{stop.rounded_arrival ?? '-'}</td><td>{stop.rounded_departure ?? '-'}</td><td>{stop.raw_arrival_millis ?? '-'} / {stop.raw_departure_millis ?? '-'}</td><td>{stop.run_millis ?? '-'} / {stop.dwell_millis}</td></tr>{/each}</tbody></table></div>{#each preview.warnings as warning}<p class="notice warning" role="alert">警告: {warning}</p>{/each}{:else}<p class="muted">駅対応を確認後に生成します。</p>{/if}</section>
-  <section class="step" aria-labelledby="step8"><h2 id="step8">8. Operation 選択</h2>{#if preview?.operation_present}<fieldset><legend>Operation 情報が存在します</legend><label><input type="radio" value="preserve" bind:group={policy} /> 元のまま保持する（意味上の整合性は保証されません）</label><label><input type="radio" value="remove_target_train" bind:group={policy} /> 対象列車から削除する</label></fieldset>{:else}<p>Operation 情報はありません。</p>{/if}</section>
-  <section class="step" aria-labelledby="step9"><h2 id="step9">9. 保存</h2><p class="notice warning" role="alert"><strong>注意:</strong> 選択した元の OuDia ファイルを直接上書きします。重要なファイルは事前にバックアップしてください。保存中は OuDia など他のアプリからファイルを編集しないでください。</p><p>上書き対象: <strong>{oudiaPath || 'OuDiaファイル未選択'}</strong></p><button onclick={saveFile} disabled={!oudiaPath || !preview || busy !== '' || !!receipt}>元ファイルを上書き保存</button><p>変更対象は対象列車の EkiJikoku 時刻部分のみです。読込後にファイルが外部変更されていた場合は上書きを拒否します。</p>{#if receipt}<p class="notice success" role="status">元ファイルを上書きしました: {receipt.output_path}（{receipt.bytes} bytes、SHA-256: {receipt.sha256}）。</p><button onclick={reloadOudia} disabled={busy !== ''}>同じファイルを再度選択する</button>{/if}</section>
+  <section class="step" aria-labelledby="step8">
+    <h2 id="step8">8. Operation・出区設定</h2>
+    <fieldset>
+      <legend>既存Operation</legend>
+      <label><input type="radio" value="preserve" bind:group={policy} onchange={invalidatePreview} disabled={busy !== ''} /> 元のまま保持する（意味上の整合性は保証されません）</label>
+      <label><input type="radio" value="remove_target_train" bind:group={policy} onchange={invalidatePreview} disabled={busy !== ''} /> 対象列車から削除する</label>
+    </fieldset>
+    <fieldset>
+      <legend>出区（任意・既定OFF）</legend>
+      <label><input type="checkbox" bind:checked={generateOutbound} onchange={invalidatePreview} disabled={!outbound?.valid || busy !== ''} /> 保存済み出庫時分から出区時刻を生成する</label>
+      {#if !outbound?.valid}<p class="muted">Step 3で有効な出庫時分を保存してください。</p>{/if}
+      <p class="muted">「削除」と出区生成を両方選ぶと、対象列車の既存Operationを削除した後、新規出区を生成します。「保持」で別の開始作業がある場合は保存を拒否します。</p>
+    </fieldset>
+    <button onclick={buildPreview} disabled={!candidate || busy !== '' || manualIssues().length !== 0}>設定を反映してプレビューを生成</button>
+    {#if preview?.outbound}
+      <table aria-label="出区プレビュー"><tbody>
+        <tr><th>出区時刻</th><td>{preview.outbound.outbound_time}</td></tr>
+        <tr><th>始発駅発</th><td>{preview.outbound.first_departure}</td></tr>
+        <tr><th>使用する出庫時分</th><td>{preview.outbound.duration_label}</td></tr>
+      </tbody></table>
+    {/if}
+  </section>
+  <section class="step" aria-labelledby="step9"><h2 id="step9">9. 保存</h2><p class="notice warning" role="alert"><strong>注意:</strong> 選択した元の OuDia ファイルを直接上書きします。重要なファイルは事前にバックアップしてください。保存中は OuDia など他のアプリからファイルを編集しないでください。</p><p>上書き対象: <strong>{oudiaPath || 'OuDiaファイル未選択'}</strong></p><button onclick={saveFile} disabled={!oudiaPath || !preview || busy !== '' || !!receipt}>元ファイルを上書き保存</button><p>変更対象は対象列車の EkiJikoku 時刻と、明示選択した Operation のみです。読込後にファイルが外部変更されていた場合は上書きを拒否します。</p>{#if receipt}<p class="notice success" role="status">元ファイルを上書きしました: {receipt.output_path}（{receipt.bytes} bytes、SHA-256: {receipt.sha256}）。</p><button onclick={reloadOudia} disabled={busy !== ''}>同じファイルを再度選択する</button>{/if}</section>
 </main>

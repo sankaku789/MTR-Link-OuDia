@@ -19,8 +19,8 @@ use futures_util::{StreamExt, stream};
 use mtr_oudia_domain::{
     GeneratedTimetable, KijunDiaIndex, MtrNetworkSnapshot, MtrRouteSnapshot, OperationPolicy,
     OudiaDirection, OudiaPatch, OudiaRouteTemplate, OudiaSource, ReferenceDiagramSelection,
-    RouteMatchCandidate, RouteMatchOutcome, build_eki_jikoku_patch_with_groups,
-    build_oudia_route_templates, generate_timetable, match_mtr_route,
+    RouteMatchCandidate, RouteMatchOutcome, build_conversion_patch, build_oudia_route_templates,
+    generate_timetable, match_mtr_route,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -378,6 +378,8 @@ pub struct StationMappingDto {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreviewDto {
+    #[serde(default)]
+    pub outbound: Option<OutboundPreviewDto>,
     pub id: PreviewId,
     pub fixed_base_time: String,
     pub stops: Vec<PreviewStopDto>,
@@ -385,6 +387,13 @@ pub struct PreviewDto {
     pub crosses_midnight: bool,
     pub operation_present: bool,
     pub policy_choices: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboundPreviewDto {
+    pub outbound_time: String,
+    pub first_departure: String,
+    pub duration_label: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreviewStopDto {
@@ -431,6 +440,8 @@ struct Candidate {
 }
 #[derive(Clone)]
 struct Preview {
+    outbound_setting: Option<OutboundRuntimeSetting>,
+    operation_policy: OperationPolicy,
     revision: u64,
     template: OudiaRouteTemplate,
     timetable: GeneratedTimetable,
@@ -789,6 +800,17 @@ impl<
         candidate_id: Option<&CandidateId>,
         manual: Option<ManualMappingInput>,
     ) -> Result<PreviewDto, BusinessError> {
+        self.build_preview_with_outbound(id, candidate_id, manual, OperationPolicy::Preserve, false)
+    }
+
+    pub fn build_preview_with_outbound(
+        &self,
+        id: &SessionId,
+        candidate_id: Option<&CandidateId>,
+        manual: Option<ManualMappingInput>,
+        policy: OperationPolicy,
+        generate_outbound: bool,
+    ) -> Result<PreviewDto, BusinessError> {
         self.store.update(id, |s| {
             let candidate = candidate_id
                 .and_then(|v| s.candidates.get(v))
@@ -862,10 +884,69 @@ impl<
                 .iter()
                 .any(|v| v.key.starts_with("Operation"));
             let pid = PreviewId(format!("preview-{}-{}", s.revision, s.previews.len()));
-            let dto = preview_dto(pid.clone(), route, &timetable, operation_present);
+            let mut dto = preview_dto(pid.clone(), route, &timetable, operation_present);
+            let outbound_setting = if generate_outbound {
+                let dimension = s.snapshot.as_ref().unwrap().snapshot.dimension;
+                let status = outbound::status_for_route(dimension, route, &self.settings.load()?)?;
+                if !status.valid {
+                    return Err(BusinessError::new(
+                        BusinessErrorKind::SelectionRequired,
+                        "有効な出庫時分がありません。測定または手動入力してください",
+                    ));
+                }
+                let setting = status.setting.unwrap();
+                build_conversion_patch(
+                    source,
+                    &candidate.template,
+                    &timetable,
+                    &station_slot_groups,
+                    policy,
+                    Some(setting.runtime),
+                )
+                .map_err(|error| BusinessError {
+                    kind: BusinessErrorKind::SaveVerification,
+                    message:
+                        "出区生成を含む保存計画を作成できません。既存の開始作業を確認してください"
+                            .into(),
+                    detail: Some(error.to_string()),
+                })?;
+                let first_time = timetable
+                    .stops
+                    .first()
+                    .and_then(|stop| stop.departure)
+                    .ok_or_else(|| {
+                        BusinessError::new(
+                            BusinessErrorKind::Validation,
+                            "始発駅発時刻がありません",
+                        )
+                    })?;
+                let out = setting
+                    .runtime
+                    .outbound_time(first_time)
+                    .map_err(domain_error)?;
+                let seconds = out
+                    .rounded_seconds()
+                    .map_err(domain_error)?
+                    .rem_euclid(86_400);
+                dto.outbound = Some(OutboundPreviewDto {
+                    outbound_time: format!(
+                        "{:02}:{:02}:{:02}",
+                        seconds / 3600,
+                        seconds / 60 % 60,
+                        seconds % 60
+                    ),
+                    first_departure: dto.fixed_base_time.clone(),
+                    duration_label: status.duration_label,
+                });
+                Some(setting)
+            } else {
+                None
+            };
             s.previews.insert(
                 pid,
                 Preview {
+                    outbound_setting,
+                    operation_policy: policy,
                     revision: s.revision,
                     template: candidate.template,
                     timetable,
@@ -901,6 +982,23 @@ impl<
                     "プレビューが古くなっています",
                 ));
             }
+            if let Some(used) = &preview.outbound_setting {
+                if policy != preview.operation_policy {
+                    return Err(BusinessError::new(
+                        BusinessErrorKind::StaleState,
+                        "Operation方針が変わりました。プレビューを再生成してください",
+                    ));
+                }
+                let route = selected_route(s)?;
+                let dimension = s.snapshot.as_ref().unwrap().snapshot.dimension;
+                let current = outbound::status_for_route(dimension, route, &self.settings.load()?)?;
+                if !current.valid || current.setting.as_ref() != Some(used) {
+                    return Err(BusinessError::new(
+                        BusinessErrorKind::StaleState,
+                        "出庫時分が変わりました。プレビューを再生成してください",
+                    ));
+                }
+            }
             Ok((
                 s.source.as_ref().unwrap().0.clone(),
                 *h,
@@ -914,12 +1012,16 @@ impl<
                 "24 時を超える時刻は保存できません",
             ));
         }
-        let patch = build_eki_jikoku_patch_with_groups(
+        let patch = build_conversion_patch(
             &source,
             &preview.template,
             &preview.timetable,
             &preview.station_slot_groups,
             policy,
+            preview
+                .outbound_setting
+                .as_ref()
+                .map(|setting| setting.runtime),
         )
         .map_err(|error| {
             #[cfg(debug_assertions)]
@@ -1161,6 +1263,7 @@ fn preview_dto(
     operation_present: bool,
 ) -> PreviewDto {
     PreviewDto {
+        outbound: None,
         id,
         fixed_base_time: "10:00:00".into(),
         stops: timetable

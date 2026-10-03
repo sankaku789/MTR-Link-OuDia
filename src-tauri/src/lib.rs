@@ -150,6 +150,9 @@ pub struct PreviewRequest {
     session_id: String,
     candidate_id: String,
     manual_mappings: Option<ManualMappingInput>,
+    #[serde(default)]
+    generate_outbound: bool,
+    policy: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -293,12 +296,15 @@ fn build_preview(
     state: tauri::State<'_, AppState>,
     input: PreviewRequest,
 ) -> Result<mtr_oudia_application::PreviewDto, ErrorDto> {
+    let policy = operation_policy(input.policy.as_deref().unwrap_or("preserve"))?;
     state
         .service
-        .build_preview(
+        .build_preview_with_outbound(
             &SessionId(input.session_id),
             Some(&CandidateId(input.candidate_id)),
             input.manual_mappings,
+            policy,
+            input.generate_outbound,
         )
         .map_err(Into::into)
 }
@@ -308,17 +314,7 @@ fn save_conversion(
     state: tauri::State<'_, AppState>,
     input: SaveRequest,
 ) -> Result<mtr_oudia_application::SaveReceipt, ErrorDto> {
-    let policy = match input.policy.as_str() {
-        "preserve" => OperationPolicy::Preserve,
-        "remove_target_train" => OperationPolicy::RemoveTargetTrain,
-        _ => {
-            return Err(ErrorDto {
-                kind: "Validation".into(),
-                message: "Operation 方針が不正です".into(),
-                detail: None,
-            })
-        }
-    };
+    let policy = operation_policy(&input.policy)?;
     state
         .service
         .save_conversion(
@@ -328,6 +324,20 @@ fn save_conversion(
             policy,
         )
         .map_err(Into::into)
+}
+
+fn operation_policy(value: &str) -> Result<OperationPolicy, ErrorDto> {
+    Ok(match value {
+        "preserve" => OperationPolicy::Preserve,
+        "remove_target_train" => OperationPolicy::RemoveTargetTrain,
+        _ => {
+            return Err(ErrorDto {
+                kind: "Validation".into(),
+                message: "Operation 方針が不正です".into(),
+                detail: None,
+            })
+        }
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -392,6 +402,8 @@ mod tests {
         }))
         .unwrap();
         let request: PreviewRequest = serde_json::from_str(&json).unwrap();
+        assert!(!request.generate_outbound);
+        assert!(request.policy.is_none());
         assert_eq!(request.session_id, "s");
         assert_eq!(request.candidate_id, "c");
         assert_eq!(
