@@ -6,6 +6,7 @@ use mtr_oudia_infrastructure::JsonSettingsRepository;
 
 fn record() -> OutboundRuntimeSetting {
     OutboundRuntimeSetting {
+        runtime_basis: mtr_oudia_application::OutboundRuntimeBasis::FirstArrival,
         dimension: 0,
         route_id: "0000000000000001".into(),
         first_station_id: "0000000000000002".into(),

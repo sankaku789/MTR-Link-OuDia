@@ -39,7 +39,7 @@ async fn measurement_use_case_needs_no_oudia_file_or_conversion_candidate() {
     )
     .await
     .unwrap();
-    assert_eq!(result.runtime.millis(), 107_000);
+    assert_eq!(result.runtime.millis(), 77_000);
     assert_eq!(result.dimension, 2);
 }
 
@@ -77,7 +77,7 @@ fn response(arrivals: Vec<ArrivalDto>) -> ArrivalsDto {
 }
 
 #[test]
-fn measures_first_departure_in_minecraft_timezone_not_station_arrival() {
+fn measures_first_arrival_in_minecraft_timezone_excluding_station_dwell() {
     let measured = measure_arrivals(
         0,
         &route(),
@@ -86,7 +86,7 @@ fn measures_first_departure_in_minecraft_timezone_not_station_arrival() {
         &response(vec![arrival()]),
     )
     .unwrap();
-    assert_eq!(measured.runtime.millis(), 107_000);
+    assert_eq!(measured.runtime.millis(), 77_000);
     assert_eq!(measured.measured_at, 10_800_000);
 }
 
@@ -106,14 +106,14 @@ fn wraps_midnight_and_supports_non_jst_timezone() {
         .unwrap()
         .runtime
         .millis(),
-        90_000
+        80_000
     );
     assert_eq!(
         measure_arrivals(0, &route(), "18:59:10", "-05:00", &response(vec![a]))
             .unwrap()
             .runtime
             .millis(),
-        90_000
+        80_000
     );
 }
 
@@ -151,7 +151,7 @@ fn filters_selected_route_and_first_platform() {
         .unwrap()
         .runtime
         .millis(),
-        107_000
+        77_000
     );
 }
 

@@ -30,7 +30,7 @@ impl MtrApiClient for Client {
                     "2",
                     "始発",
                     "1",
-                    ServiceTimeMillis::new(0).unwrap(),
+                    ServiceTimeMillis::new(30_000).unwrap(),
                     Some(ServiceTimeMillis::new(120_000).unwrap()),
                 )
                 .unwrap(),
@@ -158,7 +158,7 @@ async fn on_previews_then_safely_updates_only_selected_outbound_time() {
         )
         .unwrap();
     let outbound = preview.outbound.as_ref().unwrap();
-    assert_eq!(outbound.outbound_time, "09:58:13");
+    assert_eq!(outbound.outbound_time, "09:57:43");
     assert_eq!(outbound.first_departure, "10:00:00");
     assert!(outbound.duration_label.contains("107秒"));
     assert_eq!(std::fs::read(&input).unwrap(), FIXTURE.as_bytes());
@@ -178,7 +178,7 @@ async fn on_previews_then_safely_updates_only_selected_outbound_time() {
     let bytes = std::fs::read(input).unwrap();
     assert_eq!(
         bytes,
-        FIXTURE.replace("3/2359$/1;2", "3/095813$/1;2").as_bytes()
+        FIXTURE.replace("3/2359$/1;2", "3/095743$/1;2").as_bytes()
     );
     parse_oudia(bytes).unwrap();
 }
@@ -235,7 +235,7 @@ async fn conflicts_refuse_preview_but_explicit_removal_then_generation_is_consis
         )
         .unwrap();
     let text = std::fs::read_to_string(input).unwrap();
-    assert!(text.contains("Operation0B=3/095813$/"));
+    assert!(text.contains("Operation0B=3/095743$/"));
     assert!(!text.contains("Operation1A="));
     assert!(text.contains("UnknownTrainField=対象外"));
 }

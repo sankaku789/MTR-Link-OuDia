@@ -136,7 +136,7 @@ async fn manual_save_and_reload_work_without_any_oudia_file() {
         measured.setting.as_ref().unwrap().source,
         mtr_oudia_application::OutboundRuntimeSource::Measured
     );
-    assert_eq!(measured.setting.as_ref().unwrap().runtime.millis(), 107_000);
+    assert_eq!(measured.setting.as_ref().unwrap().runtime.millis(), 77_000);
     assert_eq!(measured.setting.as_ref().unwrap().measured_at, 1000);
 }
 
@@ -165,6 +165,22 @@ async fn station_or_platform_changes_make_saved_value_stale_without_deleting_it(
     service
         .save_manual_outbound(&session, "0000000000000001", 107)
         .unwrap();
+    // Older records omit the timing basis and contain first-station dwell.
+    let settings_path = directory.path().join("settings.json");
+    let original = std::fs::read_to_string(&settings_path).unwrap();
+    let mut legacy: serde_json::Value = serde_json::from_str(&original).unwrap();
+    legacy["outbound_runtimes"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("runtime_basis");
+    std::fs::write(&settings_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let old_status = service
+        .outbound_status(&session, "0000000000000001")
+        .unwrap();
+    assert!(!old_status.valid);
+    assert!(old_status.setting.is_some());
+    assert!(old_status.message.unwrap().contains("停車時間"));
+    std::fs::write(&settings_path, original).unwrap();
     for changed in [("4", "1"), ("2", "2")] {
         *client.0.lock().unwrap() = (changed.0.into(), changed.1.into());
         service

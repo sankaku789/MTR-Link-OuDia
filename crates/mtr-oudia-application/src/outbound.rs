@@ -53,11 +53,11 @@ pub fn measure_arrivals(
     }
     let clock = parse_clock(depot_clock)?;
     let offset = parse_utc_offset(utc_offset)?;
-    let departure = ServiceTimeMillis::new(candidate.departure.rem_euclid(86_400_000))
-        .map_err(|_| input_error("API発車時刻が不正です"))?;
+    let arrival = ServiceTimeMillis::new(candidate.arrival.rem_euclid(86_400_000))
+        .map_err(|_| input_error("API到着時刻が不正です"))?;
     let depot = ServiceTimeMillis::new((clock - offset).rem_euclid(86_400_000))
         .map_err(|_| input_error("車庫発時刻が不正です"))?;
-    let runtime = OutboundRuntime::between_daily_times(depot, departure)
+    let runtime = OutboundRuntime::between_daily_times(depot, arrival)
         .map_err(|_| input_error("出庫時分を計算できません"))?;
     Ok(OutboundRuntimeSetting {
         dimension,
@@ -67,6 +67,7 @@ pub fn measure_arrivals(
         runtime,
         measured_at: response.current_time_millis,
         source: OutboundRuntimeSource::Measured,
+        runtime_basis: OutboundRuntimeBasis::FirstArrival,
     })
 }
 
@@ -153,6 +154,9 @@ pub enum OutboundRuntimeSource {
 /// 1 dimension・1路線につき1値。構成識別情報は再測定判定に使う。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboundRuntimeSetting {
+    /// 省略された旧設定は始発駅の停車時間込み。
+    #[serde(default)]
+    pub runtime_basis: OutboundRuntimeBasis,
     pub dimension: u32,
     pub route_id: String,
     pub first_station_id: String,
@@ -166,6 +170,14 @@ pub struct OutboundRuntimeSetting {
     /// 測定/入力時のepoch millis。
     pub measured_at: i64,
     pub source: OutboundRuntimeSource,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboundRuntimeBasis {
+    #[default]
+    FirstDeparture,
+    FirstArrival,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -193,7 +205,8 @@ pub(crate) fn status_for_route(
         .find(|s| s.dimension == dimension && ids_equal(&s.route_id, &route.route_id))
         .cloned();
     let valid = setting.as_ref().is_some_and(|s| {
-        ids_equal(&s.first_station_id, &first.station_id)
+        s.runtime_basis == OutboundRuntimeBasis::FirstArrival
+            && ids_equal(&s.first_station_id, &first.station_id)
             && s.first_platform_name == first.platform_name
     });
     let duration_label = setting
@@ -208,7 +221,12 @@ pub(crate) fn status_for_route(
             )
         })
         .unwrap_or_else(|| "未測定".into());
-    let message = if setting.is_some() && !valid {
+    let message = if setting
+        .as_ref()
+        .is_some_and(|s| s.runtime_basis != OutboundRuntimeBasis::FirstArrival)
+    {
+        Some("以前の保存値は始発駅の停車時間を含むため、再測定または再入力が必要".into())
+    } else if setting.is_some() && !valid {
         Some("現在の路線構成と一致しないため再測定が必要".into())
     } else {
         None
@@ -306,6 +324,7 @@ impl<
                 .map_err(|_| input_error("出庫時分は非負の秒数で入力してください"))?,
             measured_at,
             source: OutboundRuntimeSource::Manual,
+            runtime_basis: OutboundRuntimeBasis::FirstArrival,
         };
         self.persist_outbound(id, revision, &setting)?;
         self.outbound_status(id, route_id)

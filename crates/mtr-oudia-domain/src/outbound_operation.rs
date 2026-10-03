@@ -12,6 +12,7 @@ pub fn build_conversion_patch(
     station_slot_groups: &[Vec<usize>],
     operation_policy: OperationPolicy,
     outbound_runtime: Option<OutboundRuntime>,
+    first_station_dwell: ServiceTimeMillis,
 ) -> Result<OudiaPatch, EkiJikokuPatchError> {
     let base = build_eki_jikoku_patch_with_groups(
         source,
@@ -40,7 +41,7 @@ pub fn build_conversion_patch(
     )
     .map_err(|_| EkiJikokuPatchError::TimeShapeMismatch)?;
     let out = runtime
-        .outbound_time(first_time)
+        .outbound_time_from_departure(first_time, first_station_dwell)
         .map_err(|_| EkiJikokuPatchError::TimeShapeMismatch)?;
     let out_seconds = out
         .rounded_seconds()

@@ -5,7 +5,7 @@ fn time(millis: i64) -> ServiceTimeMillis {
 }
 
 #[test]
-fn measures_until_first_departure_including_seconds_and_dwell() {
+fn measures_until_first_arrival_including_seconds() {
     let runtime = OutboundRuntime::between_daily_times(time(43_200_000), time(43_307_000)).unwrap();
     assert_eq!(runtime.millis(), 107_000);
     assert_eq!(
@@ -13,6 +13,25 @@ fn measures_until_first_departure_including_seconds_and_dwell() {
             .unwrap()
             .millis(),
         0
+    );
+}
+
+#[test]
+fn subtracts_first_dwell_before_runtime_and_wraps_midnight() {
+    let runtime = OutboundRuntime::new(107_000).unwrap();
+    assert_eq!(
+        runtime
+            .outbound_time_from_departure(time(36_000_000), time(30_000))
+            .unwrap()
+            .millis(),
+        35_863_000
+    );
+    assert_eq!(
+        runtime
+            .outbound_time_from_departure(time(10_000), time(30_000))
+            .unwrap()
+            .millis(),
+        86_273_000
     );
 }
 

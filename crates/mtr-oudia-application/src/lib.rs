@@ -2,8 +2,8 @@
 
 mod outbound;
 pub use outbound::{
-    ArrivalDto, ArrivalsDto, OutboundRuntimeSetting, OutboundRuntimeSource, OutboundStatusDto,
-    measure_arrivals, measure_outbound_runtime,
+    ArrivalDto, ArrivalsDto, OutboundRuntimeBasis, OutboundRuntimeSetting, OutboundRuntimeSource,
+    OutboundStatusDto, measure_arrivals, measure_outbound_runtime,
 };
 
 use std::{
@@ -440,6 +440,7 @@ struct Candidate {
 }
 #[derive(Clone)]
 struct Preview {
+    first_station_dwell: mtr_oudia_domain::ServiceTimeMillis,
     outbound_setting: Option<OutboundRuntimeSetting>,
     operation_policy: OperationPolicy,
     revision: u64,
@@ -884,6 +885,7 @@ impl<
                 .iter()
                 .any(|v| v.key.starts_with("Operation"));
             let pid = PreviewId(format!("preview-{}-{}", s.revision, s.previews.len()));
+            let first_station_dwell = route.stops[0].dwell_millis;
             let mut dto = preview_dto(pid.clone(), route, &timetable, operation_present);
             let outbound_setting = if generate_outbound {
                 let dimension = s.snapshot.as_ref().unwrap().snapshot.dimension;
@@ -902,6 +904,7 @@ impl<
                     &station_slot_groups,
                     policy,
                     Some(setting.runtime),
+                    first_station_dwell,
                 )
                 .map_err(|error| BusinessError {
                     kind: BusinessErrorKind::SaveVerification,
@@ -922,7 +925,7 @@ impl<
                     })?;
                 let out = setting
                     .runtime
-                    .outbound_time(first_time)
+                    .outbound_time_from_departure(first_time, first_station_dwell)
                     .map_err(domain_error)?;
                 let seconds = out
                     .rounded_seconds()
@@ -945,6 +948,7 @@ impl<
             s.previews.insert(
                 pid,
                 Preview {
+                    first_station_dwell,
                     outbound_setting,
                     operation_policy: policy,
                     revision: s.revision,
@@ -1022,6 +1026,7 @@ impl<
                 .outbound_setting
                 .as_ref()
                 .map(|setting| setting.runtime),
+            preview.first_station_dwell,
         )
         .map_err(|error| {
             #[cfg(debug_assertions)]

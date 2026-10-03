@@ -68,7 +68,15 @@ fn plan(
         .iter()
         .map(|slot| vec![*slot])
         .collect::<Vec<_>>();
-    build_conversion_patch(source, template, &timetable, &groups, policy, runtime)
+    build_conversion_patch(
+        source,
+        template,
+        &timetable,
+        &groups,
+        policy,
+        runtime,
+        ServiceTimeMillis::new(0).unwrap(),
+    )
 }
 
 fn runtime() -> Option<OutboundRuntime> {

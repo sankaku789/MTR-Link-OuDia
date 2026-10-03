@@ -90,7 +90,7 @@
         <p>駅数: {route.station_count} / 総運転時分: {milliseconds(route.total_run_millis)} / 総停車時分: {milliseconds(route.total_dwell_millis)}</p>
         <ol>{#each route.stations as station}<li>{station.station_name}（ホーム: {station.platform_name || '記載なし'} / 停車: {milliseconds(station.dwell_millis)} / 次駅まで: {milliseconds(station.run_millis_to_next)}）</li>{/each}</ol>
         <fieldset>
-          <legend>車庫 → 始発駅発 出庫時分</legend>
+          <legend>車庫発 → 始発駅着 出庫時分（停車時間を除く）</legend>
           <p role="status">{outbound?.duration_label ?? '未測定'}</p>
           <p>始発駅: {outbound?.first_station_name ?? route.stations[0]?.station_name} / ホーム: {outbound?.first_platform_name || route.stations[0]?.platform_name || '記載なし'}</p>
           {#if outbound?.setting}<p>保存日時: {new Date(outbound.setting.measured_at).toLocaleString()}（{outbound.setting.source === 'manual' ? '手動入力' : 'API測定'}）</p>{/if}
@@ -106,7 +106,7 @@
             <label>Minecraft端末のUTCオフセット <input bind:value={utcOffset} placeholder="例: +09:00" aria-label="Minecraft端末のUTCオフセット" disabled={busy !== ''} /></label>
             <p class="muted">試験発車日のMinecraft端末の時間帯を入力してください。夏時間やJavaの時間帯設定にも注意してください。</p>
           {:else if outboundMode === 'manual'}
-            <label>車庫発 → 始発駅発（秒） <input type="number" min="0" step="1" bind:value={manualSeconds} disabled={busy !== ''} /></label>
+            <label>車庫発 → 始発駅着（秒・停車時間を除く） <input type="number" min="0" step="1" bind:value={manualSeconds} disabled={busy !== ''} /></label>
           {/if}
           {#if outboundMode}<div class="fields"><button disabled={busy !== ''} onclick={saveOutbound}>{outboundMode === 'measure' ? '測定して保存' : '秒数を保存'}</button><button disabled={busy !== ''} onclick={() => outboundMode = undefined}>キャンセル</button></div>{/if}
         </fieldset>
@@ -126,6 +126,7 @@
     </fieldset>
     <fieldset>
       <legend>出区（任意・既定OFF）</legend>
+      <p class="muted">出区時刻 = 始発駅発 − 始発駅の停車時間 − 保存済み出庫時分</p>
       <label><input type="checkbox" bind:checked={generateOutbound} onchange={invalidatePreview} disabled={!outbound?.valid || busy !== ''} /> 保存済み出庫時分から出区時刻を生成する</label>
       {#if !outbound?.valid}<p class="muted">Step 3で有効な出庫時分を保存してください。</p>{/if}
       <p class="muted">「削除」と出区生成を両方選ぶと、対象列車の既存Operationを削除した後、新規出区を生成します。「保持」で別の開始作業がある場合は保存を拒否します。</p>
@@ -135,7 +136,7 @@
       <table aria-label="出区プレビュー"><tbody>
         <tr><th>出区時刻</th><td>{preview.outbound.outbound_time}</td></tr>
         <tr><th>始発駅発</th><td>{preview.outbound.first_departure}</td></tr>
-        <tr><th>使用する出庫時分</th><td>{preview.outbound.duration_label}</td></tr>
+        <tr><th>使用する出庫時分（停車時間を除く）</th><td>{preview.outbound.duration_label}</td></tr>
       </tbody></table>
     {/if}
   </section>
