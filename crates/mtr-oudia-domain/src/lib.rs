@@ -5,6 +5,7 @@ use std::fmt;
 
 pub mod mtr_id;
 pub mod oudia;
+pub mod outbound_operation;
 pub mod outbound_runtime;
 pub mod patch;
 pub mod route_matching;
@@ -12,6 +13,7 @@ pub mod timetable;
 
 pub use mtr_id::*;
 pub use oudia::*;
+pub use outbound_operation::*;
 pub use outbound_runtime::*;
 pub use patch::*;
 pub use route_matching::*;

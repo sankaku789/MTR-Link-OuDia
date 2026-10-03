@@ -292,18 +292,16 @@ pub fn build_eki_jikoku_patch_with_groups(
         return Err(EkiJikokuPatchError::AmbiguousOperation);
     }
     if operation_policy == OperationPolicy::RemoveTargetTrain {
-        if operations.len() != 1 {
-            return Err(EkiJikokuPatchError::AmbiguousOperation);
+        for property in operations {
+            replacements.push(ByteReplacement {
+                range: property.whole_line_range,
+                expected: source.bytes
+                    [property.whole_line_range.start()..property.whole_line_range.end()]
+                    .to_vec(),
+                replacement: Vec::new(),
+                kind: ByteReplacementKind::Operation,
+            });
         }
-        let property = operations[0];
-        replacements.push(ByteReplacement {
-            range: property.whole_line_range,
-            expected: source.bytes
-                [property.whole_line_range.start()..property.whole_line_range.end()]
-                .to_vec(),
-            replacement: Vec::new(),
-            kind: ByteReplacementKind::Operation,
-        });
     }
     OudiaPatch::new(replacements).map_err(EkiJikokuPatchError::InvalidPatch)
 }
