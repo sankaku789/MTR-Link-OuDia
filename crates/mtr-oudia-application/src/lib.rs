@@ -1,5 +1,8 @@
 //! Domain のユースケース境界と Port を置く Application 層。
 
+mod outbound;
+pub use outbound::{OutboundRuntimeSetting, OutboundRuntimeSource};
+
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     path::{Path, PathBuf},
@@ -214,9 +217,21 @@ pub struct SaveReceipt {
 pub trait SettingsRepository: Send + Sync {
     fn load(&self) -> Result<SettingsSnapshot, BusinessError>;
     fn save_last_successful_endpoint(&self, endpoint: &MtrEndpoint) -> Result<(), BusinessError>;
+    fn save_outbound_runtime(
+        &self,
+        _setting: &OutboundRuntimeSetting,
+    ) -> Result<(), BusinessError> {
+        Err(BusinessError {
+            kind: BusinessErrorKind::Internal,
+            message: "出庫時分の保存に対応していません".into(),
+            detail: None,
+        })
+    }
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SettingsSnapshot {
+    #[serde(default)]
+    pub outbound_runtimes: Vec<OutboundRuntimeSetting>,
     pub last_endpoint: Option<String>,
     pub station_aliases: BTreeMap<String, String>,
     pub route_mappings: Vec<RouteMappingSetting>,
