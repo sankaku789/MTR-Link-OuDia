@@ -93,8 +93,12 @@
         <p>駅数: {route.station_count} / 総運転時分: {milliseconds(route.total_run_millis)} / 総停車時分: {milliseconds(route.total_dwell_millis)}</p>
         <ol>{#each route.stations as station}<li>{station.station_name}（ホーム: {station.platform_name || '記載なし'} / 停車: {milliseconds(station.dwell_millis)} / 次駅まで: {milliseconds(station.run_millis_to_next)}）</li>{/each}</ol>
         <fieldset>
-          <legend>車庫発 → 始発駅着 出庫時分（停車時間を除く）</legend>
-          <p role="status">{outbound?.duration_label ?? '未測定'}</p>
+          <legend>出庫・始発駅の時間</legend>
+          <table aria-label="出庫所要時間の内訳"><tbody>
+            <tr><th>始発駅停車時間</th><td>{milliseconds(route.stations[0]?.dwell_millis)}</td></tr>
+            <tr><th>出庫 → 始発駅所要時間</th><td>{outbound?.duration_label ?? '未測定'}</td></tr>
+          </tbody></table>
+          <p class="muted">所要時間は車庫発から始発駅着までです。停車時間は含みません。</p>
           <p>始発駅: {outbound?.first_station_name ?? route.stations[0]?.station_name} / ホーム: {outbound?.first_platform_name || route.stations[0]?.platform_name || '記載なし'}</p>
           {#if outbound?.setting}<p>保存日時: {new Date(outbound.setting.measured_at).toLocaleString()}（{outbound.setting.source === 'manual' ? '手動入力' : 'API測定'}）</p>{/if}
           {#if outbound?.message}<p class="notice warning" role="alert">{outbound.message}</p>{/if}
@@ -139,7 +143,8 @@
       <table aria-label="出区プレビュー"><tbody>
         <tr><th>出区時刻</th><td>{preview.outbound.outbound_time}</td></tr>
         <tr><th>始発駅発</th><td>{preview.outbound.first_departure}</td></tr>
-        <tr><th>使用する出庫時分（停車時間を除く）</th><td>{preview.outbound.duration_label}</td></tr>
+        <tr><th>始発駅停車時間</th><td>{milliseconds(preview.stops[0]?.dwell_millis)}</td></tr>
+        <tr><th>出庫 → 始発駅所要時間</th><td>{preview.outbound.duration_label}</td></tr>
       </tbody></table>
     {/if}
   </section>
