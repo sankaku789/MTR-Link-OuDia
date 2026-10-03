@@ -2,6 +2,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { onMount } from 'svelte';
   import { sortRoutesForDisplay, filterRoutesForDisplay } from '$lib/route-sort';
+  import { formatDwell } from '$lib/duration-format';
   import type { OutboundStatus } from '$lib/api';
   import { api, type Candidate, type Inspection, type Preview, type Route, type SaveReceipt, type Snapshot } from '$lib/api';
 
@@ -95,7 +96,7 @@
         <fieldset>
           <legend>出庫・始発駅の時間</legend>
           <table aria-label="出庫所要時間の内訳"><tbody>
-            <tr><th>始発駅停車時間</th><td>{milliseconds(route.stations[0]?.dwell_millis)}</td></tr>
+            <tr><th>始発駅停車時間</th><td>{formatDwell(route.stations[0]?.dwell_millis)}</td></tr>
             <tr><th>出庫 → 始発駅所要時間</th><td>{outbound?.duration_label ?? '未測定'}</td></tr>
           </tbody></table>
           <p class="muted">所要時間は車庫発から始発駅着までです。停車時間は含みません。</p>
@@ -143,7 +144,7 @@
       <table aria-label="出区プレビュー"><tbody>
         <tr><th>出区時刻</th><td>{preview.outbound.outbound_time}</td></tr>
         <tr><th>始発駅発</th><td>{preview.outbound.first_departure}</td></tr>
-        <tr><th>始発駅停車時間</th><td>{milliseconds(preview.stops[0]?.dwell_millis)}</td></tr>
+        <tr><th>始発駅停車時間</th><td>{formatDwell(preview.stops[0]?.dwell_millis)}</td></tr>
         <tr><th>出庫 → 始発駅所要時間</th><td>{preview.outbound.duration_label}</td></tr>
       </tbody></table>
     {/if}
