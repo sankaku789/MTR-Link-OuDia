@@ -1,13 +1,14 @@
 <script lang="ts">
   import { open } from '@tauri-apps/plugin-dialog';
   import { onMount } from 'svelte';
-  import { sortRoutesForDisplay } from '$lib/route-sort';
+  import { sortRoutesForDisplay, filterRoutesForDisplay } from '$lib/route-sort';
   import type { OutboundStatus } from '$lib/api';
   import { api, type Candidate, type Inspection, type Preview, type Route, type SaveReceipt, type Snapshot } from '$lib/api';
 
   let sessionId = $state<string>(); let endpoint = $state(''); let dimension = $state(0);
   let snapshot = $state<Snapshot>(); let route = $state<Route>(); let oudiaPath = $state(''); let inspection = $state<Inspection>();
-  const displayRoutes = $derived(sortRoutesForDisplay(snapshot?.routes ?? []));
+  let routeQuery = $state('');
+  const displayRoutes = $derived(filterRoutesForDisplay(sortRoutesForDisplay(snapshot?.routes ?? []), routeQuery));
   let diagramIndex = $state<number>(); let trainType = $state<number>(); let candidates = $state<Candidate[]>([]); let candidate = $state<Candidate>();
   let manualMode = $state(false); let manualSlots = $state<number[][]>([]);
   let preview = $state<Preview>(); let policy = $state('preserve'); let receipt = $state<SaveReceipt>();
@@ -85,7 +86,9 @@
   <section class="step" aria-labelledby="step3">
     <h2 id="step3">3. MTR 路線選択</h2>
     {#if snapshot}
-      <label>路線 <select bind:value={route} onchange={chooseRoute} disabled={busy !== ''}><option value={undefined}>選択してください</option>{#each displayRoutes as item}<option value={item}>{item.name}</option>{/each}</select></label>
+      <label>路線名で検索 <input type="search" bind:value={routeQuery} placeholder="路線名の一部を入力" disabled={busy !== ''} /></label>
+      <p class="muted" role="status">{displayRoutes.length}件{displayRoutes.length === 0 ? '：一致する路線がありません。' : ''}</p>
+      <label>路線 <select bind:value={route} onchange={chooseRoute} disabled={busy !== ''}><option value={undefined}>選択してください</option>{#if route && !displayRoutes.includes(route)}<option value={route}>{route.name}（選択中・検索対象外）</option>{/if}{#each displayRoutes as item}<option value={item}>{item.name}</option>{/each}</select></label>
       {#if route}
         <p>駅数: {route.station_count} / 総運転時分: {milliseconds(route.total_run_millis)} / 総停車時分: {milliseconds(route.total_dwell_millis)}</p>
         <ol>{#each route.stations as station}<li>{station.station_name}（ホーム: {station.platform_name || '記載なし'} / 停車: {milliseconds(station.dwell_millis)} / 次駅まで: {milliseconds(station.run_millis_to_next)}）</li>{/each}</ol>

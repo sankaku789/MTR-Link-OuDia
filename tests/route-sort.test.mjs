@@ -7,8 +7,17 @@ const source = await readFile(new URL('../src/lib/route-sort.ts', import.meta.ur
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 }
 }).outputText;
-const { sortRoutesForDisplay } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
+const { sortRoutesForDisplay, filterRoutesForDisplay } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
 const route = (id, name) => ({ id, name });
+
+test('route search matches partial names ignoring case and fullwidth differences', () => {
+  const routes = Object.freeze([route('1', '中央線'), route('2', 'Airport２')]);
+  assert.deepEqual(filterRoutesForDisplay(routes, ' 中央 '), [routes[0]]);
+  assert.deepEqual(filterRoutesForDisplay(routes, 'airport2'), [routes[1]]);
+  assert.deepEqual(filterRoutesForDisplay(routes, '  '), routes);
+  assert.deepEqual(filterRoutesForDisplay(routes, '該当なし'), []);
+  assert.equal(routes.length, 2);
+});
 
 test('Japanese route names are ascending', () => {
   assert.deepEqual(sortRoutesForDisplay([route('2', '東西線'), route('1', '中央線')]).map(r => r.name), ['中央線', '東西線']);
