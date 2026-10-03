@@ -1759,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "mtr-link-oudia"
-version = "1.0.0-beta"
+version = "1.2.0-beta"
 dependencies = [
  "mtr-oudia-application",
  "mtr-oudia-domain",
@@ -1773,7 +1773,7 @@ dependencies = [
 
 [[package]]
 name = "mtr-oudia-application"
-version = "1.0.0-beta"
+version = "1.2.0-beta"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1787,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "mtr-oudia-domain"
-version = "1.0.0-beta"
+version = "1.2.0-beta"
 dependencies = [
  "encoding_rs",
  "unicode-normalization",
@@ -1795,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "mtr-oudia-infrastructure"
-version = "1.0.0-beta"
+version = "1.2.0-beta"
 dependencies = [
  "futures-util",
  "mtr-oudia-application",
