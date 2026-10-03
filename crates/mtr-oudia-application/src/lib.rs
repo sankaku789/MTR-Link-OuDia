@@ -99,6 +99,8 @@ pub struct MtrSnapshotResponse {
     pub available_dimensions: Vec<serde_json::Value>,
 }
 #[async_trait]
+// async_trait emits redundant must_use attributes on boxed Futures (Clippy 1.99+).
+#[allow(clippy::double_must_use)]
 pub trait MtrApiClient: Send + Sync {
     async fn fetch_arrivals(
         &self,

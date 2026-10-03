@@ -217,7 +217,7 @@ pub(crate) fn status_for_route(
             format!(
                 "{seconds}秒（{}分{}秒）",
                 whole_seconds / 60,
-                whole_seconds % 60
+                (s.runtime.millis() % 60_000) as f64 / 1000.0
             )
         })
         .unwrap_or_else(|| "未測定".into());
@@ -301,6 +301,32 @@ impl<
         route_id: &str,
         seconds: i64,
     ) -> Result<OutboundStatusDto, BusinessError> {
+        let runtime = OutboundRuntime::from_seconds(seconds)
+            .map_err(|_| input_error("出庫時分は非負の秒数で入力してください"))?;
+        self.save_manual_outbound_millis(id, route_id, runtime)
+    }
+
+    pub fn save_manual_outbound_decimal(
+        &self,
+        id: &crate::SessionId,
+        route_id: &str,
+        seconds: f64,
+    ) -> Result<OutboundStatusDto, BusinessError> {
+        let millis = (seconds * 1000.0).round();
+        if !seconds.is_finite() || seconds < 0.0 || millis > 9_007_199_254_740_991.0 {
+            return Err(input_error("出庫時分は非負の有限な秒数で入力してください"));
+        }
+        let runtime =
+            OutboundRuntime::new(millis as i64).map_err(|_| input_error("出庫時分が範囲外です"))?;
+        self.save_manual_outbound_millis(id, route_id, runtime)
+    }
+
+    fn save_manual_outbound_millis(
+        &self,
+        id: &crate::SessionId,
+        route_id: &str,
+        runtime: OutboundRuntime,
+    ) -> Result<OutboundStatusDto, BusinessError> {
         let (revision, _, dimension, route) = self.outbound_context(id, route_id)?;
         let first = route
             .stops
@@ -320,8 +346,7 @@ impl<
                 .map_err(|_| input_error("始発駅IDが不正です"))?
                 .to_hex(),
             first_platform_name: first.platform_name.clone(),
-            runtime: OutboundRuntime::from_seconds(seconds)
-                .map_err(|_| input_error("出庫時分は非負の秒数で入力してください"))?,
+            runtime,
             measured_at,
             source: OutboundRuntimeSource::Manual,
             runtime_basis: OutboundRuntimeBasis::FirstArrival,

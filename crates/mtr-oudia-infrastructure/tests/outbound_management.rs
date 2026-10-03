@@ -127,6 +127,18 @@ async fn manual_save_and_reload_work_without_any_oudia_file() {
         .unwrap();
     assert!(status.valid);
     assert_eq!(status.setting.unwrap().runtime.millis(), 107_000);
+    let decimal = new_service
+        .save_manual_outbound_decimal(&new_session, "0000000000000001", 13.5)
+        .unwrap();
+    assert_eq!(decimal.setting.unwrap().runtime.millis(), 13_500);
+    assert!(decimal.duration_label.contains("0分13.5秒"));
+    for invalid in [-0.1, f64::NAN, f64::INFINITY, f64::MAX] {
+        assert!(
+            new_service
+                .save_manual_outbound_decimal(&new_session, "0000000000000001", invalid)
+                .is_err()
+        );
+    }
     let measured = new_service
         .measure_and_save_outbound(&new_session, "0000000000000001", "00:00:00", "+00:00")
         .await

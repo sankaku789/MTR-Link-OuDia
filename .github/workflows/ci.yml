@@ -18,11 +18,12 @@ jobs:
         with:
           node-version: 22
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo test --workspace
-      - run: npm install
+      - run: npm ci
+      - run: npm test
       - run: npm run check
       - run: npm run build
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace
 
   windows:
     runs-on: windows-latest

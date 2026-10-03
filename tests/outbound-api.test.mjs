@@ -20,6 +20,8 @@ test('measurement, manual input, and reload use independent settings commands, n
   assert.deepEqual(calls.map(c => c.command), ['get_outbound_status', 'measure_outbound_runtime', 'save_manual_outbound']);
   assert.deepEqual(calls[1].arguments_.input, { sessionId: 's', routeId: 'r', depotClock: '12:00:00', utcOffset: '+09:00' });
   assert.equal(calls[2].arguments_.input.seconds, 107);
+  await api.manualOutbound('s', 'r', 13.5);
+  assert.equal(calls[3].arguments_.input.seconds, 13.5);
 });
 
 test('preview defaults outbound generation to OFF and transmits opt-in separately from operation policy', async () => {

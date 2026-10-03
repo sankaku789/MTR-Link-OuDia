@@ -31,7 +31,7 @@
     const id = sessionId; const routeId = route.id;
     const mode = outboundMode;
     return task('出庫時分を測定・保存中です。', async () => {
-      if (mode === 'manual' && (manualSeconds === undefined || !Number.isSafeInteger(manualSeconds))) throw new Error('出庫時分は整数の秒数で入力してください。');
+      if (mode === 'manual' && (manualSeconds === undefined || !Number.isFinite(manualSeconds) || manualSeconds < 0)) throw new Error('出庫時分は0以上の秒数で入力してください。小数も使用できます。');
       const value = mode === 'measure' ? await api.measureOutbound(id, routeId, depotClock, utcOffset) : await api.manualOutbound(id, routeId, manualSeconds!);
       if (route?.id === routeId) { outbound = value; outboundMode = undefined; preview = undefined; receipt = undefined; }
     });
@@ -114,7 +114,8 @@
             <label>Minecraft端末のUTCオフセット <input bind:value={utcOffset} placeholder="例: +09:00" aria-label="Minecraft端末のUTCオフセット" disabled={busy !== ''} /></label>
             <p class="muted">試験発車日のMinecraft端末の時間帯を入力してください。夏時間やJavaの時間帯設定にも注意してください。</p>
           {:else if outboundMode === 'manual'}
-            <label>車庫発 → 始発駅着（秒・停車時間を除く） <input type="number" min="0" step="1" bind:value={manualSeconds} disabled={busy !== ''} /></label>
+            <label>車庫発 → 始発駅着（秒・停車時間を除く） <input type="number" min="0" step="0.001" bind:value={manualSeconds} disabled={busy !== ''} /></label>
+            <p class="muted">例：13.5秒。ミリ秒単位で保存します（それより細かい値は四捨五入）。OuDiaへは秒単位で丸めて書き込みます。</p>
           {/if}
           {#if outboundMode}<div class="fields"><button disabled={busy !== ''} onclick={saveOutbound}>{outboundMode === 'measure' ? '測定して保存' : '秒数を保存'}</button><button disabled={busy !== ''} onclick={() => outboundMode = undefined}>キャンセル</button></div>{/if}
         </fieldset>

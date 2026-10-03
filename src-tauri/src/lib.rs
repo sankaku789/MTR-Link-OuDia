@@ -182,7 +182,7 @@ pub struct MeasureOutboundRequest {
 pub struct ManualOutboundRequest {
     session_id: String,
     route_id: String,
-    seconds: i64,
+    seconds: f64,
 }
 
 #[tauri::command]
@@ -218,7 +218,7 @@ fn save_manual_outbound(
 ) -> Result<mtr_oudia_application::OutboundStatusDto, ErrorDto> {
     state
         .service
-        .save_manual_outbound(&SessionId(input.session_id), &input.route_id, input.seconds)
+        .save_manual_outbound_decimal(&SessionId(input.session_id), &input.route_id, input.seconds)
         .map_err(Into::into)
 }
 
