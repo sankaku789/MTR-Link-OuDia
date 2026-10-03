@@ -36,6 +36,21 @@ pub struct OudiaSource {
 }
 
 impl OudiaSource {
+    /// 原本と同じ文字コードで、新規patch文字列だけを符号化する。
+    pub fn encode_text(&self, text: &str) -> Result<Vec<u8>, DomainError> {
+        match self.encoding {
+            TextEncoding::Utf8 => Ok(text.as_bytes().to_vec()),
+            TextEncoding::Windows31J => {
+                let (bytes, _, errors) = encoding_rs::SHIFT_JIS.encode(text);
+                if errors {
+                    return Err(DomainError::InvalidValue {
+                        value_name: "Windows-31J patch text",
+                    });
+                }
+                Ok(bytes.into_owned())
+            }
+        }
+    }
     /// 無変更保存で使用する原本バイト列を返す。
     pub fn unchanged_bytes(&self) -> &[u8] {
         &self.bytes
@@ -522,7 +537,7 @@ fn parse_cell(raw: String, source_range: SourceRange) -> Result<EkiJikokuCell, D
     })
 }
 
-fn parse_time(value: &str) -> Result<Option<OudiaTime>, DomainError> {
+pub(crate) fn parse_time(value: &str) -> Result<Option<OudiaTime>, DomainError> {
     if value.is_empty() {
         return Ok(None);
     }

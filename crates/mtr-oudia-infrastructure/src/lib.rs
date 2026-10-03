@@ -6,8 +6,8 @@ use mtr_oudia_application::DomainPort;
 use mtr_oudia_application::ListeningPortProvider;
 use mtr_oudia_application::{
     ApplicationError, BusinessError, BusinessErrorKind, MinecraftLogProvider, MinecraftLogRead,
-    MtrApiClient, MtrEndpoint, MtrSnapshotResponse, OudiaRepository, SaveReceipt,
-    SettingsRepository, SettingsSnapshot, ValidatedSavePort, async_trait,
+    MtrApiClient, MtrEndpoint, MtrSnapshotResponse, OudiaRepository, OutboundRuntimeSetting,
+    SaveReceipt, SettingsRepository, SettingsSnapshot, ValidatedSavePort, async_trait,
 };
 use mtr_oudia_domain::{
     DomainLayer, MtrNetworkSnapshot, MtrRouteSnapshot, MtrStopSnapshot, ServiceTimeMillis,
@@ -18,7 +18,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod arrivals;
 pub mod safe_save;
+pub use arrivals::parse_arrivals_response;
 pub use safe_save::*;
 
 /// 設定専用の小さな JSON adapter。壊れた設定は既定値と診断へ退避する。
@@ -28,6 +30,19 @@ pub struct JsonSettingsRepository {
 impl JsonSettingsRepository {
     pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
         Self { path: path.into() }
+    }
+    fn save_snapshot(&self, settings: &SettingsSnapshot) -> Result<(), BusinessError> {
+        let bytes = serde_json::to_vec_pretty(settings).map_err(|_| BusinessError {
+            kind: BusinessErrorKind::Internal,
+            message: "設定を保存できません".into(),
+            detail: None,
+        })?;
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).map_err(io_business_error)?;
+        }
+        let temporary = self.path.with_extension("json.tmp");
+        std::fs::write(&temporary, bytes).map_err(io_business_error)?;
+        std::fs::rename(temporary, &self.path).map_err(io_business_error)
     }
 }
 impl SettingsRepository for JsonSettingsRepository {
@@ -50,17 +65,20 @@ impl SettingsRepository for JsonSettingsRepository {
     fn save_last_successful_endpoint(&self, endpoint: &MtrEndpoint) -> Result<(), BusinessError> {
         let mut settings = self.load()?;
         settings.last_endpoint = Some(endpoint.as_url().to_string());
-        let bytes = serde_json::to_vec_pretty(&settings).map_err(|_| BusinessError {
-            kind: BusinessErrorKind::Internal,
-            message: "設定を保存できません".into(),
-            detail: None,
-        })?;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(io_business_error)?;
+        self.save_snapshot(&settings)
+    }
+    fn save_outbound_runtime(&self, setting: &OutboundRuntimeSetting) -> Result<(), BusinessError> {
+        let mut settings = self.load()?;
+        if let Some(existing) = settings
+            .outbound_runtimes
+            .iter_mut()
+            .find(|item| item.dimension == setting.dimension && item.route_id == setting.route_id)
+        {
+            *existing = setting.clone();
+        } else {
+            settings.outbound_runtimes.push(setting.clone());
         }
-        let temporary = self.path.with_extension("json.tmp");
-        std::fs::write(&temporary, bytes).map_err(io_business_error)?;
-        std::fs::rename(temporary, &self.path).map_err(io_business_error)
+        self.save_snapshot(&settings)
     }
 }
 
@@ -283,6 +301,14 @@ fn build_client(response_timeout: Duration) -> Result<reqwest::Client, Applicati
 
 #[async_trait]
 impl MtrApiClient for ReqwestMtrApiClient {
+    async fn fetch_arrivals(
+        &self,
+        endpoint: &MtrEndpoint,
+        dimension: u32,
+        station_id: &str,
+    ) -> Result<mtr_oudia_application::ArrivalsDto, ApplicationError> {
+        arrivals::fetch_arrivals(&self.fast_client, endpoint, dimension, station_id).await
+    }
     async fn probe_endpoint(
         &self,
         endpoint: &MtrEndpoint,
@@ -369,6 +395,12 @@ async fn fetch_response(
             );
             map_reqwest_error(error)
         })?;
+    read_http_response(response).await
+}
+
+async fn read_http_response(
+    response: reqwest::Response,
+) -> Result<(reqwest::StatusCode, String), ApplicationError> {
     let status = response.status();
     debug_mtr_api!(
         "HTTPステータス: {status}, Content-Length: {:?}, timeout=false",

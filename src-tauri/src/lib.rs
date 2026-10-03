@@ -150,6 +150,9 @@ pub struct PreviewRequest {
     session_id: String,
     candidate_id: String,
     manual_mappings: Option<ManualMappingInput>,
+    #[serde(default)]
+    generate_outbound: bool,
+    policy: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -158,6 +161,65 @@ pub struct SaveRequest {
     preview_id: String,
     output_path: String,
     policy: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundRequest {
+    session_id: String,
+    route_id: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasureOutboundRequest {
+    session_id: String,
+    route_id: String,
+    depot_clock: String,
+    utc_offset: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualOutboundRequest {
+    session_id: String,
+    route_id: String,
+    seconds: i64,
+}
+
+#[tauri::command]
+fn get_outbound_status(
+    state: tauri::State<'_, AppState>,
+    input: OutboundRequest,
+) -> Result<mtr_oudia_application::OutboundStatusDto, ErrorDto> {
+    state
+        .service
+        .outbound_status(&SessionId(input.session_id), &input.route_id)
+        .map_err(Into::into)
+}
+#[tauri::command]
+async fn measure_outbound_runtime(
+    state: tauri::State<'_, AppState>,
+    input: MeasureOutboundRequest,
+) -> Result<mtr_oudia_application::OutboundStatusDto, ErrorDto> {
+    state
+        .service
+        .measure_and_save_outbound(
+            &SessionId(input.session_id),
+            &input.route_id,
+            &input.depot_clock,
+            &input.utc_offset,
+        )
+        .await
+        .map_err(Into::into)
+}
+#[tauri::command]
+fn save_manual_outbound(
+    state: tauri::State<'_, AppState>,
+    input: ManualOutboundRequest,
+) -> Result<mtr_oudia_application::OutboundStatusDto, ErrorDto> {
+    state
+        .service
+        .save_manual_outbound(&SessionId(input.session_id), &input.route_id, input.seconds)
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -234,12 +296,15 @@ fn build_preview(
     state: tauri::State<'_, AppState>,
     input: PreviewRequest,
 ) -> Result<mtr_oudia_application::PreviewDto, ErrorDto> {
+    let policy = operation_policy(input.policy.as_deref().unwrap_or("preserve"))?;
     state
         .service
-        .build_preview(
+        .build_preview_with_outbound(
             &SessionId(input.session_id),
             Some(&CandidateId(input.candidate_id)),
             input.manual_mappings,
+            policy,
+            input.generate_outbound,
         )
         .map_err(Into::into)
 }
@@ -249,17 +314,7 @@ fn save_conversion(
     state: tauri::State<'_, AppState>,
     input: SaveRequest,
 ) -> Result<mtr_oudia_application::SaveReceipt, ErrorDto> {
-    let policy = match input.policy.as_str() {
-        "preserve" => OperationPolicy::Preserve,
-        "remove_target_train" => OperationPolicy::RemoveTargetTrain,
-        _ => {
-            return Err(ErrorDto {
-                kind: "Validation".into(),
-                message: "Operation 方針が不正です".into(),
-                detail: None,
-            })
-        }
-    };
+    let policy = operation_policy(&input.policy)?;
     state
         .service
         .save_conversion(
@@ -269,6 +324,20 @@ fn save_conversion(
             policy,
         )
         .map_err(Into::into)
+}
+
+fn operation_policy(value: &str) -> Result<OperationPolicy, ErrorDto> {
+    Ok(match value {
+        "preserve" => OperationPolicy::Preserve,
+        "remove_target_train" => OperationPolicy::RemoveTargetTrain,
+        _ => {
+            return Err(ErrorDto {
+                kind: "Validation".into(),
+                message: "Operation 方針が不正です".into(),
+                detail: None,
+            })
+        }
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -282,6 +351,9 @@ pub fn run() {
             is_mtr_auto_detection_supported,
             detect_mtr_endpoints,
             fetch_mtr_snapshot,
+            get_outbound_status,
+            measure_outbound_runtime,
+            save_manual_outbound,
             inspect_oudia,
             find_route_candidates,
             build_preview,
@@ -330,6 +402,8 @@ mod tests {
         }))
         .unwrap();
         let request: PreviewRequest = serde_json::from_str(&json).unwrap();
+        assert!(!request.generate_outbound);
+        assert!(request.policy.is_none());
         assert_eq!(request.session_id, "s");
         assert_eq!(request.candidate_id, "c");
         assert_eq!(

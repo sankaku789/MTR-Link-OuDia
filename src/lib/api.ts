@@ -18,6 +18,7 @@ export type Candidate = {
   station_mappings: { mtr_station_index: number; oudia_station_slot: number }[];
 };
 export type Preview = {
+  outbound: { outbound_time: string; first_departure: string; duration_label: string } | null;
   id: string; fixed_base_time: string; warnings: string[]; crosses_midnight: boolean;
   operation_present: boolean; policy_choices: string[];
   stops: {
@@ -28,6 +29,11 @@ export type Preview = {
   }[];
 };
 export type SaveReceipt = { output_path: string; bytes: number; sha256: string };
+export type OutboundStatus = {
+  setting: { outbound_millis: number; measured_at: number; source: 'measured' | 'manual' } | null;
+  valid: boolean; message: string | null; duration_label: string;
+  first_station_name: string; first_platform_name: string;
+};
 
 function unavailable(error: unknown): never {
   if (typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)) {
@@ -49,6 +55,9 @@ async function callWithoutInput<T>(command: string): Promise<T> {
 }
 
 export const api = {
+  outboundStatus: (sessionId: string, routeId: string) => call<OutboundStatus>('get_outbound_status', { sessionId, routeId }),
+  measureOutbound: (sessionId: string, routeId: string, depotClock: string, utcOffset: string) => call<OutboundStatus>('measure_outbound_runtime', { sessionId, routeId, depotClock, utcOffset }),
+  manualOutbound: (sessionId: string, routeId: string, seconds: number) => call<OutboundStatus>('save_manual_outbound', { sessionId, routeId, seconds }),
   createSession: () => callWithoutInput<string>('create_conversion_session'),
   autoDetectionSupported: () => callWithoutInput<boolean>('is_mtr_auto_detection_supported'),
   detect: (sessionId?: string) => call<[string, Endpoint[]]>('detect_mtr_endpoints', { sessionId }),
@@ -61,8 +70,8 @@ export const api = {
   },
   candidates: (sessionId: string, routeId: string, diagramIndex?: number, trainType?: number) =>
     call<Candidate[]>('find_route_candidates', { sessionId, routeId, diagramIndex, trainType }),
-  preview: (sessionId: string, candidateId: string, manualMappings?: { mtr_station_index: number; oudia_station_slot: number }[]) =>
-    call<Preview>('build_preview', { sessionId, candidateId, manualMappings: manualMappings ? { station_mappings: manualMappings } : undefined }),
+  preview: (sessionId: string, candidateId: string, manualMappings?: { mtr_station_index: number; oudia_station_slot: number }[], generateOutbound = false, policy = 'preserve') =>
+    call<Preview>('build_preview', { sessionId, candidateId, manualMappings: manualMappings ? { station_mappings: manualMappings } : undefined, generateOutbound, policy }),
   save: (sessionId: string, previewId: string, outputPath: string, policy: string) =>
     call<SaveReceipt>('save_conversion', { sessionId, previewId, outputPath, policy })
 };
