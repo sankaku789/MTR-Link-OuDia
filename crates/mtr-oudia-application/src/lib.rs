@@ -2,8 +2,8 @@
 
 mod outbound;
 pub use outbound::{
-    ArrivalDto, ArrivalsDto, OutboundRuntimeSetting, OutboundRuntimeSource, measure_arrivals,
-    measure_outbound_runtime,
+    ArrivalDto, ArrivalsDto, OutboundRuntimeSetting, OutboundRuntimeSource, OutboundStatusDto,
+    measure_arrivals, measure_outbound_runtime,
 };
 
 use std::{

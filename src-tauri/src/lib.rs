@@ -160,6 +160,65 @@ pub struct SaveRequest {
     policy: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutboundRequest {
+    session_id: String,
+    route_id: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeasureOutboundRequest {
+    session_id: String,
+    route_id: String,
+    depot_clock: String,
+    utc_offset: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualOutboundRequest {
+    session_id: String,
+    route_id: String,
+    seconds: i64,
+}
+
+#[tauri::command]
+fn get_outbound_status(
+    state: tauri::State<'_, AppState>,
+    input: OutboundRequest,
+) -> Result<mtr_oudia_application::OutboundStatusDto, ErrorDto> {
+    state
+        .service
+        .outbound_status(&SessionId(input.session_id), &input.route_id)
+        .map_err(Into::into)
+}
+#[tauri::command]
+async fn measure_outbound_runtime(
+    state: tauri::State<'_, AppState>,
+    input: MeasureOutboundRequest,
+) -> Result<mtr_oudia_application::OutboundStatusDto, ErrorDto> {
+    state
+        .service
+        .measure_and_save_outbound(
+            &SessionId(input.session_id),
+            &input.route_id,
+            &input.depot_clock,
+            &input.utc_offset,
+        )
+        .await
+        .map_err(Into::into)
+}
+#[tauri::command]
+fn save_manual_outbound(
+    state: tauri::State<'_, AppState>,
+    input: ManualOutboundRequest,
+) -> Result<mtr_oudia_application::OutboundStatusDto, ErrorDto> {
+    state
+        .service
+        .save_manual_outbound(&SessionId(input.session_id), &input.route_id, input.seconds)
+        .map_err(Into::into)
+}
+
 #[tauri::command]
 async fn detect_mtr_endpoints(
     state: tauri::State<'_, AppState>,
@@ -282,6 +341,9 @@ pub fn run() {
             is_mtr_auto_detection_supported,
             detect_mtr_endpoints,
             fetch_mtr_snapshot,
+            get_outbound_status,
+            measure_outbound_runtime,
+            save_manual_outbound,
             inspect_oudia,
             find_route_candidates,
             build_preview,

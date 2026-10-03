@@ -168,6 +168,190 @@ pub struct OutboundRuntimeSetting {
     pub source: OutboundRuntimeSource,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct OutboundStatusDto {
+    pub setting: Option<OutboundRuntimeSetting>,
+    pub valid: bool,
+    pub message: Option<String>,
+    pub duration_label: String,
+    pub first_station_name: String,
+    pub first_platform_name: String,
+}
+
+pub(crate) fn status_for_route(
+    dimension: u32,
+    route: &MtrRouteSnapshot,
+    settings: &crate::SettingsSnapshot,
+) -> Result<OutboundStatusDto, BusinessError> {
+    let first = route
+        .stops
+        .first()
+        .ok_or_else(|| input_error("始発駅がありません"))?;
+    let setting = settings
+        .outbound_runtimes
+        .iter()
+        .find(|s| s.dimension == dimension && ids_equal(&s.route_id, &route.route_id))
+        .cloned();
+    let valid = setting.as_ref().is_some_and(|s| {
+        ids_equal(&s.first_station_id, &first.station_id)
+            && s.first_platform_name == first.platform_name
+    });
+    let duration_label = setting
+        .as_ref()
+        .map(|s| {
+            let seconds = s.runtime.millis() as f64 / 1000.0;
+            let whole_seconds = s.runtime.millis() / 1000;
+            format!(
+                "{seconds}秒（{}分{}秒）",
+                whole_seconds / 60,
+                whole_seconds % 60
+            )
+        })
+        .unwrap_or_else(|| "未測定".into());
+    let message = if setting.is_some() && !valid {
+        Some("現在の路線構成と一致しないため再測定が必要".into())
+    } else {
+        None
+    };
+    Ok(OutboundStatusDto {
+        setting,
+        valid,
+        message,
+        duration_label,
+        first_station_name: first.station_name.clone(),
+        first_platform_name: first.platform_name.clone(),
+    })
+}
+
+fn ids_equal(left: &str, right: &str) -> bool {
+    match (MtrId::from_hex(left), MtrId::from_hex(right)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => left == right,
+    }
+}
+
+impl<
+    'a,
+    P: crate::ListeningPortProvider + ?Sized,
+    C: crate::MtrApiClient + ?Sized,
+    R: crate::OudiaRepository + ?Sized,
+    S: crate::SettingsRepository + ?Sized,
+    V: crate::ValidatedSavePort + ?Sized,
+> crate::ConversionService<'a, P, C, R, S, V>
+{
+    fn outbound_context(
+        &self,
+        id: &crate::SessionId,
+        route_id: &str,
+    ) -> Result<(u64, crate::MtrEndpoint, u32, MtrRouteSnapshot), BusinessError> {
+        self.store.with(id, |s| {
+            let snapshot = s
+                .snapshot
+                .as_ref()
+                .ok_or_else(|| input_error("MTRへ接続してください"))?;
+            let route = snapshot
+                .snapshot
+                .routes
+                .iter()
+                .find(|r| r.route_id == route_id)
+                .ok_or_else(|| input_error("路線を選択してください"))?;
+            let endpoint = s
+                .endpoint
+                .clone()
+                .ok_or_else(|| input_error("MTRへ接続してください"))?;
+            Ok((
+                s.revision,
+                endpoint,
+                snapshot.snapshot.dimension,
+                route.clone(),
+            ))
+        })
+    }
+
+    pub fn outbound_status(
+        &self,
+        id: &crate::SessionId,
+        route_id: &str,
+    ) -> Result<OutboundStatusDto, BusinessError> {
+        let (_, _, dimension, route) = self.outbound_context(id, route_id)?;
+        status_for_route(dimension, &route, &self.settings.load()?)
+    }
+
+    pub fn save_manual_outbound(
+        &self,
+        id: &crate::SessionId,
+        route_id: &str,
+        seconds: i64,
+    ) -> Result<OutboundStatusDto, BusinessError> {
+        let (revision, _, dimension, route) = self.outbound_context(id, route_id)?;
+        let first = route
+            .stops
+            .first()
+            .ok_or_else(|| input_error("始発駅がありません"))?;
+        let measured_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_millis()).ok())
+            .ok_or_else(|| input_error("現在時刻を取得できません"))?;
+        let setting = OutboundRuntimeSetting {
+            dimension,
+            route_id: MtrId::from_hex(&route.route_id)
+                .map_err(|_| input_error("路線IDが不正です"))?
+                .to_hex(),
+            first_station_id: MtrId::from_hex(&first.station_id)
+                .map_err(|_| input_error("始発駅IDが不正です"))?
+                .to_hex(),
+            first_platform_name: first.platform_name.clone(),
+            runtime: OutboundRuntime::from_seconds(seconds)
+                .map_err(|_| input_error("出庫時分は非負の秒数で入力してください"))?,
+            measured_at,
+            source: OutboundRuntimeSource::Manual,
+        };
+        self.persist_outbound(id, revision, &setting)?;
+        self.outbound_status(id, route_id)
+    }
+
+    pub async fn measure_and_save_outbound(
+        &self,
+        id: &crate::SessionId,
+        route_id: &str,
+        depot_clock: &str,
+        utc_offset: &str,
+    ) -> Result<OutboundStatusDto, BusinessError> {
+        let (revision, endpoint, dimension, route) = self.outbound_context(id, route_id)?;
+        let setting = measure_outbound_runtime(
+            self.client,
+            &endpoint,
+            dimension,
+            &route,
+            depot_clock,
+            utc_offset,
+        )
+        .await?;
+        self.persist_outbound(id, revision, &setting)?;
+        self.outbound_status(id, route_id)
+    }
+
+    fn persist_outbound(
+        &self,
+        id: &crate::SessionId,
+        revision: u64,
+        setting: &OutboundRuntimeSetting,
+    ) -> Result<(), BusinessError> {
+        self.store.update(id, |s| {
+            if s.revision != revision {
+                return Err(BusinessError::new(
+                    BusinessErrorKind::StaleState,
+                    "測定中に入力が変更されました。再測定してください",
+                ));
+            }
+            self.settings.save_outbound_runtime(setting)?;
+            s.previews.clear();
+            Ok(())
+        })
+    }
+}
+
 fn serialize_runtime<S: Serializer>(
     value: &OutboundRuntime,
     serializer: S,
