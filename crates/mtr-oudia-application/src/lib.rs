@@ -2,8 +2,9 @@
 
 mod outbound;
 pub use outbound::{
-    ArrivalDto, ArrivalsDto, OutboundRuntimeBasis, OutboundRuntimeSetting, OutboundRuntimeSource,
-    OutboundStatusDto, measure_arrivals, measure_outbound_runtime,
+    ArrivalDto, ArrivalsDto, ObaArrivalDto, ObaArrivalsDto, OutboundRuntimeBasis,
+    OutboundRuntimeSetting, OutboundRuntimeSource, OutboundStatusDto, measure_arrivals,
+    measure_oba_arrivals, measure_outbound_runtime,
 };
 
 use std::{
@@ -102,6 +103,18 @@ pub struct MtrSnapshotResponse {
 // async_trait emits redundant must_use attributes on boxed Futures (Clippy 1.99+).
 #[allow(clippy::double_must_use)]
 pub trait MtrApiClient: Send + Sync {
+    /// OBAの路線情報をMTR路線に一意に照合した予定値のみ返す。
+    async fn fetch_oba_arrivals(
+        &self,
+        _endpoint: &MtrEndpoint,
+        _dimension: u32,
+        _route_id: &str,
+        _platform_id: &str,
+    ) -> Result<ObaArrivalsDto, ApplicationError> {
+        Err(ApplicationError::InvalidResponse {
+            reason: "OBA予定取得に対応していません".into(),
+        })
+    }
     async fn fetch_arrivals(
         &self,
         _endpoint: &MtrEndpoint,

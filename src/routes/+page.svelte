@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import { sortRoutesForDisplay, filterRoutesForDisplay } from '$lib/route-sort';
   import { formatDwell } from '$lib/duration-format';
+  import { formatUtcOffset } from '$lib/utc-offset';
   import type { OutboundStatus } from '$lib/api';
   import { api, type Candidate, type Inspection, type Preview, type Route, type SaveReceipt, type Snapshot } from '$lib/api';
 
@@ -36,7 +37,7 @@
       if (route?.id === routeId) { outbound = value; outboundMode = undefined; preview = undefined; receipt = undefined; }
     });
   }
-  onMount(async () => { try { autoDetectionSupported = await api.autoDetectionSupported(); } catch { autoDetectionSupported = false; } });
+  onMount(async () => { utcOffset = formatUtcOffset(new Date().getTimezoneOffset()); try { autoDetectionSupported = await api.autoDetectionSupported(); } catch { autoDetectionSupported = false; } });
   const dimText = (value: unknown) => typeof value === 'string' ? value : JSON.stringify(value);
   const milliseconds = (value: number | undefined) => value === undefined ? 'なし' : `${value} ms`;
   const selectedTemplate = () => inspection?.templates.find((item) => item.diagram_index === candidate?.diagram_index && item.train_index === candidate?.train_index);
@@ -109,10 +110,15 @@
             <button disabled={busy !== ''} onclick={() => outboundMode = 'manual'}>手動入力</button>
           </div>
           {#if outboundMode === 'measure'}
-            <p>MTR側で既知のリアルタイム車庫発を1本設定し、予定ダイヤを生成してください。走行開始を待つ必要はありません。</p>
-            <label>試験列車の車庫発 <input bind:value={depotClock} placeholder="12:00:00" aria-label="試験列車の車庫発" disabled={busy !== ''} /></label>
-            <label>Minecraft端末のUTCオフセット <input bind:value={utcOffset} placeholder="例: +09:00" aria-label="Minecraft端末のUTCオフセット" disabled={busy !== ''} /></label>
-            <p class="muted">試験発車日のMinecraft端末の時間帯を入力してください。夏時間やJavaの時間帯設定にも注意してください。</p>
+            <p>MTR側で既知のリアルタイム車庫発を1本設定し、予定ダイヤを生成してください。走行開始を待つ必要はありません。入力した時間帯で当日の試験出庫を測定します。</p>
+            <div class="fields">
+              <label>試験列車の車庫発 <input bind:value={depotClock} placeholder="12:00:00" aria-label="試験列車の車庫発" disabled={busy !== ''} /></label>
+            </div>
+            <div class="fields">
+              <label>Minecraft端末のUTCオフセット（このPCから自動入力） <input bind:value={utcOffset} placeholder="例: +09:00" aria-label="Minecraft端末のUTCオフセット" disabled={busy !== ''} /></label>
+            </div>
+            <p class="muted">通常は変更不要です。Minecraft端末やJavaの時間帯がこのPCと異なる場合だけ変更してください。夏時間にも注意してください。</p>
+            <p class="muted">OBAの運行ブロック先頭・始発ホームの予定着を使い、折返し便を除外します。基地由来は自動確認できないため、対象の試験出庫と対応することを確認してください。候補が0件または複数なら保存しません。</p>
           {:else if outboundMode === 'manual'}
             <label>車庫発 → 始発駅着（秒・停車時間を除く） <input type="number" min="0" step="0.001" bind:value={manualSeconds} disabled={busy !== ''} /></label>
             <p class="muted">例：13.5秒。ミリ秒単位で保存します（それより細かい値は四捨五入）。OuDiaへは秒単位で丸めて書き込みます。</p>

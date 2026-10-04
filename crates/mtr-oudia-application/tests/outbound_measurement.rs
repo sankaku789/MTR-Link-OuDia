@@ -8,6 +8,29 @@ use mtr_oudia_domain::{MtrId, MtrRouteSnapshot, MtrStopSnapshot, ServiceTimeMill
 struct Client;
 #[async_trait]
 impl MtrApiClient for Client {
+    async fn fetch_oba_arrivals(
+        &self,
+        _: &MtrEndpoint,
+        dimension: u32,
+        route_id: &str,
+        platform_id: &str,
+    ) -> Result<mtr_oudia_application::ObaArrivalsDto, ApplicationError> {
+        assert_eq!(dimension, 2);
+        assert_eq!(route_id, "FFFFFFFFFFFFFFFF");
+        assert_eq!(platform_id, "0000000000000002");
+        let a = arrival();
+        Ok(mtr_oudia_application::ObaArrivalsDto {
+            current_time_millis: 10_800_000,
+            arrivals: vec![mtr_oudia_application::ObaArrivalDto {
+                route_id: a.route_id,
+                platform_id: a.platform_id,
+                stop_sequence: 0,
+                block_trip_sequence: 0,
+                arrival: a.arrival,
+                departure: a.departure,
+            }],
+        })
+    }
     async fn fetch_snapshot(
         &self,
         _: &MtrEndpoint,
@@ -23,7 +46,11 @@ impl MtrApiClient for Client {
     ) -> Result<ArrivalsDto, ApplicationError> {
         assert_eq!(dimension, 2);
         assert_eq!(station_id, "0000000000000001");
-        Ok(response(vec![arrival()]))
+        // map arrivalsには同一ホームの先頭便と折返し便が両方返る。
+        let mut returning = arrival();
+        returning.arrival += 600_000;
+        returning.departure += 600_000;
+        Ok(response(vec![arrival(), returning]))
     }
 }
 

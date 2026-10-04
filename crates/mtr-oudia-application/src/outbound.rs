@@ -21,6 +21,85 @@ pub struct ArrivalsDto {
     pub arrivals: Vec<ArrivalDto>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObaArrivalDto {
+    pub route_id: MtrId,
+    pub platform_id: MtrId,
+    pub stop_sequence: u32,
+    pub block_trip_sequence: u32,
+    pub arrival: i64,
+    pub departure: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObaArrivalsDto {
+    pub current_time_millis: i64,
+    pub arrivals: Vec<ObaArrivalDto>,
+}
+
+/// 車庫発はAPI現在時刻の端末日付に属する。翌日同時刻や折返しを採用しない。
+pub fn measure_oba_arrivals(
+    dimension: u32,
+    route: &MtrRouteSnapshot,
+    platform: MtrId,
+    depot_clock: &str,
+    utc_offset: &str,
+    response: &ObaArrivalsDto,
+) -> Result<OutboundRuntimeSetting, BusinessError> {
+    let clock = parse_clock(depot_clock)?;
+    let offset = parse_utc_offset(utc_offset)?;
+    let local_now = response
+        .current_time_millis
+        .checked_add(offset)
+        .ok_or_else(|| input_error("API現在時刻が範囲外です"))?;
+    let depot = local_now
+        .div_euclid(86_400_000)
+        .checked_mul(86_400_000)
+        .and_then(|day| day.checked_add(clock))
+        .and_then(|local| local.checked_sub(offset))
+        .ok_or_else(|| input_error("車庫発時刻が範囲外です"))?;
+    let end = depot
+        .checked_add(86_400_000)
+        .ok_or_else(|| input_error("車庫発時刻が範囲外です"))?;
+    let route_id = MtrId::from_hex(&route.route_id).map_err(|_| input_error("路線IDが不正です"))?;
+    let first = route
+        .stops
+        .first()
+        .ok_or_else(|| input_error("始発駅がありません"))?;
+    let arrivals = response
+        .arrivals
+        .iter()
+        .filter(|a| {
+            a.route_id == route_id
+                && a.platform_id == platform
+                && a.stop_sequence == 0
+                && a.block_trip_sequence == 0
+                && a.arrival >= depot
+                && a.arrival < end
+        })
+        .map(|a| ArrivalDto {
+            route_id: a.route_id,
+            platform_id: a.platform_id,
+            platform_name: first.platform_name.clone(),
+            arrival: a.arrival,
+            departure: a.departure,
+            deviation: 0,
+            realtime: false,
+            departure_index: 0,
+        })
+        .collect();
+    measure_arrivals(
+        dimension,
+        route,
+        depot_clock,
+        utc_offset,
+        &ArrivalsDto {
+            current_time_millis: response.current_time_millis,
+            arrivals,
+        },
+    )
+}
+
 /// JSON/HTTPやOuDiaに依存しない測定。一意でない候補は選ばない。
 pub fn measure_arrivals(
     dimension: u32,
@@ -141,7 +220,23 @@ pub async fn measure_outbound_runtime<C: crate::MtrApiClient + ?Sized>(
         .fetch_arrivals(endpoint, dimension, &station_id)
         .await
         .map_err(crate::map_application_error)?;
-    measure_arrivals(dimension, route, depot_clock, utc_offset, &response)
+    let route_id = MtrId::from_hex(&route.route_id).map_err(|_| input_error("路線IDが不正です"))?;
+    let mut platforms = response
+        .arrivals
+        .iter()
+        .filter(|a| a.route_id == route_id && a.platform_name == first.platform_name)
+        .map(|a| a.platform_id);
+    let platform = platforms
+        .next()
+        .ok_or_else(|| input_error("対象路線の始発ホームが見つかりません"))?;
+    if platforms.any(|other| other != platform) {
+        return Err(input_error("始発ホームを一意に特定できません"));
+    }
+    let oba = client
+        .fetch_oba_arrivals(endpoint, dimension, &route.route_id, &platform.to_hex())
+        .await
+        .map_err(crate::map_application_error)?;
+    measure_oba_arrivals(dimension, route, platform, depot_clock, utc_offset, &oba)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

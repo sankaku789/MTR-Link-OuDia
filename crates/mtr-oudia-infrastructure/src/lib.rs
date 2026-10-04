@@ -19,6 +19,8 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod arrivals;
+mod oba;
+pub use oba::parse_oba_arrivals_response;
 pub mod safe_save;
 pub use arrivals::parse_arrivals_response;
 pub use safe_save::*;
@@ -301,6 +303,22 @@ fn build_client(response_timeout: Duration) -> Result<reqwest::Client, Applicati
 
 #[async_trait]
 impl MtrApiClient for ReqwestMtrApiClient {
+    async fn fetch_oba_arrivals(
+        &self,
+        endpoint: &MtrEndpoint,
+        dimension: u32,
+        route_id: &str,
+        platform_id: &str,
+    ) -> Result<mtr_oudia_application::ObaArrivalsDto, ApplicationError> {
+        oba::fetch_oba_arrivals(
+            &self.fast_client,
+            endpoint,
+            dimension,
+            route_id,
+            platform_id,
+        )
+        .await
+    }
     async fn fetch_arrivals(
         &self,
         endpoint: &MtrEndpoint,

@@ -9,8 +9,100 @@ use mtr_oudia_infrastructure::{
 use std::sync::Mutex;
 
 struct Client(Mutex<(String, String)>);
+struct FailingObaClient(Client);
+#[async_trait]
+impl MtrApiClient for FailingObaClient {
+    async fn fetch_snapshot(
+        &self,
+        endpoint: &MtrEndpoint,
+        dimension: u32,
+    ) -> Result<MtrSnapshotResponse, ApplicationError> {
+        self.0.fetch_snapshot(endpoint, dimension).await
+    }
+    async fn fetch_arrivals(
+        &self,
+        endpoint: &MtrEndpoint,
+        dimension: u32,
+        station_id: &str,
+    ) -> Result<mtr_oudia_application::ArrivalsDto, ApplicationError> {
+        self.0.fetch_arrivals(endpoint, dimension, station_id).await
+    }
+    async fn fetch_oba_arrivals(
+        &self,
+        _: &MtrEndpoint,
+        _: u32,
+        _: &str,
+        _: &str,
+    ) -> Result<mtr_oudia_application::ObaArrivalsDto, ApplicationError> {
+        Err(ApplicationError::InvalidResponse {
+            reason: "OBA予定の取得失敗".into(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn oba_failure_does_not_overwrite_a_saved_runtime() {
+    let directory = tempfile::tempdir().unwrap();
+    let settings = JsonSettingsRepository::new(directory.path().join("settings.json"));
+    let client = FailingObaClient(Client(Mutex::new(("2".into(), "1".into()))));
+    let ports = WindowsListeningPortProvider;
+    let repository = FileOudiaRepository;
+    let saver = SafeOudiaWriter::new();
+    let service = ConversionService::new(
+        ConversionSessionStore::new(2),
+        &ports,
+        &client,
+        &repository,
+        &settings,
+        &saver,
+    );
+    let session = service.create_session();
+    service
+        .fetch_mtr_snapshot(
+            &session,
+            &MtrEndpoint::parse("http://127.0.0.1/").unwrap(),
+            0,
+        )
+        .await
+        .unwrap();
+    service
+        .save_manual_outbound_decimal(&session, "0000000000000001", 43.597)
+        .unwrap();
+    let before = std::fs::read(directory.path().join("settings.json")).unwrap();
+    assert!(
+        service
+            .measure_and_save_outbound(&session, "0000000000000001", "00:00:00", "+00:00")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read(directory.path().join("settings.json")).unwrap(),
+        before
+    );
+}
 #[async_trait]
 impl MtrApiClient for Client {
+    async fn fetch_oba_arrivals(
+        &self,
+        _: &MtrEndpoint,
+        _: u32,
+        route_id: &str,
+        platform_id: &str,
+    ) -> Result<mtr_oudia_application::ObaArrivalsDto, ApplicationError> {
+        assert_eq!(route_id, "0000000000000001");
+        assert_eq!(platform_id, "0000000000000009");
+        Ok(mtr_oudia_application::ObaArrivalsDto {
+            current_time_millis: 1000,
+            arrivals: vec![mtr_oudia_application::ObaArrivalDto {
+                route_id: mtr_oudia_domain::MtrId::from_java_long(1),
+                platform_id: mtr_oudia_domain::MtrId::from_java_long(9),
+                stop_sequence: 0,
+                block_trip_sequence: 0,
+                arrival: 77_000,
+                departure: 107_000,
+            }],
+        })
+    }
     async fn fetch_arrivals(
         &self,
         _: &MtrEndpoint,
