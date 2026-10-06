@@ -17,6 +17,12 @@ struct MapRoute {
     name: String,
     number: String,
     color: u32,
+    stations: Vec<MapStop>,
+}
+#[derive(Deserialize)]
+struct MapStop {
+    id: String,
+    name: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,7 +69,7 @@ fn safe_timestamp(value: i64) -> bool {
     (0..=9_007_199_254_740_991).contains(&value)
 }
 
-/// OBAの色IDをMTR IDと混同せず、名前・種別名も一致する路線だけを正規化する。
+/// OBAの色・変換後の名前に加え、始発駅・ホームでMTR路線を一意に照合する。
 pub fn parse_oba_arrivals_response(
     map_body: &str,
     oba_body: &str,
@@ -93,20 +99,33 @@ pub fn parse_oba_arrivals_response(
     let color = format!("{:06X}", target.color);
     let long_name = format_name(&target.name);
     let short_name = format_name(&target.number);
-    if map
-        .data
-        .routes
-        .iter()
-        .filter(|r| {
-            r.color == target.color
-                && format_name(&r.name) == long_name
-                && format_name(&r.number) == short_name
-        })
-        .count()
-        != 1
-    {
+    let first = target
+        .stations
+        .first()
+        .ok_or_else(|| invalid("対象路線の始発駅がありません"))?;
+    let first_station = MtrId::from_hex(&first.id).map_err(|_| invalid("始発駅IDが不正です"))?;
+    if first.name.is_empty() {
+        return Err(invalid("対象路線の始発ホーム情報がありません"));
+    }
+    let mut matches = 0;
+    for r in &map.data.routes {
+        if r.color != target.color
+            || format_name(&r.name) != long_name
+            || format_name(&r.number) != short_name
+        {
+            continue;
+        }
+        if let Some(other_first) = r.stations.first() {
+            let station = MtrId::from_hex(&other_first.id)
+                .map_err(|_| invalid("照合対象路線の始発駅IDが不正です"))?;
+            if station == first_station && other_first.name == first.name {
+                matches += 1;
+            }
+        }
+    }
+    if matches != 1 {
         return Err(invalid(
-            "OBAの色・路線名・種別名では対象路線を一意に識別できません",
+            "OBAの色・路線名・種別名・始発駅・ホームが同じ別路線があるため、対象路線を一意に識別できません",
         ));
     }
     if MtrId::from_hex(&oba.data.entry.stop_id).ok() != Some(platform) {
@@ -122,7 +141,10 @@ pub fn parse_oba_arrivals_response(
         {
             return Err(invalid("OBA予定時刻・ホーム情報が不正です"));
         }
-        if a.route_id == color && a.route_long_name == long_name && a.route_short_name == short_name
+        if a.route_id == color
+            && a.route_long_name == long_name
+            && a.route_short_name == short_name
+            && a.stop_sequence == 0
         {
             arrivals.push(ObaArrivalDto {
                 route_id: target_id,

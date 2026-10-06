@@ -69,12 +69,11 @@ async fn oba_failure_does_not_overwrite_a_saved_runtime() {
         .save_manual_outbound_decimal(&session, "0000000000000001", 43.597)
         .unwrap();
     let before = std::fs::read(directory.path().join("settings.json")).unwrap();
-    assert!(
-        service
-            .measure_and_save_outbound(&session, "0000000000000001", "00:00:00", "+00:00")
-            .await
-            .is_err()
-    );
+    let error = service
+        .measure_and_save_outbound(&session, "0000000000000001", "00:00:00", "+00:00")
+        .await
+        .unwrap_err();
+    assert_eq!(error.detail.as_deref(), Some("OBA予定の取得失敗"));
     assert_eq!(
         std::fs::read(directory.path().join("settings.json")).unwrap(),
         before

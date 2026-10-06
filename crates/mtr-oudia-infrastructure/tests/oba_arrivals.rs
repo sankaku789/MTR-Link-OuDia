@@ -1,8 +1,8 @@
 use mtr_oudia_infrastructure::parse_oba_arrivals_response;
 
 const MAP: &str = r#"{"code":200,"data":{"routes":[
-{"id":"F6D1D37EBAB2A77A","name":"進急線北行||快速","number":"快速|RAPID","color":15819777},
-{"id":"C2BE3EB9602EC029","name":"進急線南行||快速","number":"快速|RAPID","color":15819777}
+{"id":"F6D1D37EBAB2A77A","name":"進急線北行||快速","number":"快速|RAPID","color":15819777,"stations":[{"id":"A399F8122E7B42B0","name":"1"}]},
+{"id":"C2BE3EB9602EC029","name":"進急線南行||快速","number":"快速|RAPID","color":15819777,"stations":[{"id":"A399F8122E7B42B0","name":"1"}]}
 ]}}"#;
 const OBA: &str = r#"{"code":200,"currentTime":1791120803982,"data":{"entry":{
 "stopId":"437E2294003812E9","arrivalsAndDepartures":[
@@ -39,6 +39,42 @@ fn matches_color_and_formatted_names_uses_only_scheduled_integer_milliseconds() 
 #[test]
 fn rejects_same_color_and_names_collision_instead_of_guessing_route() {
     assert!(parse(&MAP.replace("進急線南行", "進急線北行"), OBA).is_err());
+}
+
+#[test]
+fn distinguishes_names_lost_after_delimiter_using_first_station_and_platform() {
+    let mut map: serde_json::Value = serde_json::from_str(MAP).unwrap();
+    map["data"]["routes"][0]["name"] = "進急線北行||快速||ｶｺﾞ運用".into();
+    map["data"]["routes"][1]["name"] = "進急線北行||快速||ｽﾅ運用".into();
+    map["data"]["routes"][1]["stations"][0]["name"] = "2".into();
+    let result = parse(&map.to_string(), OBA).unwrap();
+    assert_eq!(result.arrivals.len(), 1);
+    assert_eq!(result.arrivals[0].route_id.to_hex(), "F6D1D37EBAB2A77A");
+
+    // 同じホーム名でも始発駅が違う路線は区別できる。
+    map["data"]["routes"][1]["stations"][0]["name"] = "1".into();
+    map["data"]["routes"][1]["stations"][0]["id"] = "CBA0ACCD099C3808".into();
+    assert_eq!(parse(&map.to_string(), OBA).unwrap().arrivals.len(), 1);
+
+    // 始発駅・ホームまで同じなら運用名が違っても推測しない。
+    map["data"]["routes"][1]["stations"][0]["id"] = "A399F8122E7B42B0".into();
+    assert!(parse(&map.to_string(), OBA).is_err());
+}
+
+#[test]
+fn refuses_missing_first_stop_and_does_not_adopt_noninitial_stop_with_same_name() {
+    let mut map: serde_json::Value = serde_json::from_str(MAP).unwrap();
+    map["data"]["routes"][0]["stations"] = serde_json::json!([]);
+    assert!(parse(&map.to_string(), OBA).is_err());
+    assert!(
+        parse(
+            MAP,
+            &OBA.replace("\"stopSequence\":0", "\"stopSequence\":14")
+        )
+        .unwrap()
+        .arrivals
+        .is_empty()
+    );
 }
 
 #[test]

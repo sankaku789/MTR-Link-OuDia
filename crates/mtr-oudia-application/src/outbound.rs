@@ -240,7 +240,14 @@ pub async fn measure_outbound_runtime<C: crate::MtrApiClient + ?Sized>(
     let oba = client
         .fetch_oba_arrivals(endpoint, dimension, &route.route_id, &platform.to_hex())
         .await
-        .map_err(crate::map_application_error)?;
+        .map_err(|error| match error {
+            crate::ApplicationError::InvalidResponse { reason } => BusinessError {
+                kind: BusinessErrorKind::ParseUnsupported,
+                message: "出庫測定のAPI情報を確認できません".into(),
+                detail: Some(reason),
+            },
+            other => crate::map_application_error(other),
+        })?;
     measure_oba_arrivals(dimension, route, platform, depot_clock, utc_offset, &oba)
 }
 
