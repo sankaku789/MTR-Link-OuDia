@@ -33,7 +33,7 @@ fn measure(arrivals: Vec<ObaArrivalDto>) -> Result<i64, mtr_oudia_application::B
         "22:03:00",
         "+09:00",
         &ObaArrivalsDto {
-            current_time_millis: 1791120803982,
+            current_time_millis: 1791118980000,
             arrivals,
         },
     )
@@ -93,4 +93,46 @@ fn supports_trial_crossing_midnight() {
     )
     .unwrap();
     assert_eq!(result.runtime.millis(), 80_000);
+}
+
+#[test]
+fn past_departure_clock_selects_next_day_and_excludes_today() {
+    let mut tomorrow = arrival();
+    tomorrow.arrival += 86_405_000;
+    tomorrow.departure += 86_405_000;
+    let result = measure_oba_arrivals(
+        0,
+        &route(),
+        tomorrow.platform_id,
+        "22:03:00",
+        "+09:00",
+        &ObaArrivalsDto {
+            current_time_millis: 1791120803982,
+            arrivals: vec![arrival(), tomorrow],
+        },
+    )
+    .unwrap();
+    assert_eq!(result.runtime.millis(), 48_597);
+}
+
+#[test]
+fn october_six_evening_finds_october_seven_ten_oclock_trial() {
+    let a = ObaArrivalDto {
+        arrival: 1791334830169,
+        departure: 1791334850169,
+        ..arrival()
+    };
+    let result = measure_oba_arrivals(
+        0,
+        &route(),
+        a.platform_id,
+        "10:00:00",
+        "+09:00",
+        &ObaArrivalsDto {
+            current_time_millis: 1791292774083,
+            arrivals: vec![a],
+        },
+    )
+    .unwrap();
+    assert_eq!(result.runtime.millis(), 30_169);
 }

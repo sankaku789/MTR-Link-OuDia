@@ -37,7 +37,7 @@ pub struct ObaArrivalsDto {
     pub arrivals: Vec<ObaArrivalDto>,
 }
 
-/// 車庫発はAPI現在時刻の端末日付に属する。翌日同時刻や折返しを採用しない。
+/// 車庫発は端末の当日、時刻が過ぎていれば翌日。別日や折返しを採用しない。
 pub fn measure_oba_arrivals(
     dimension: u32,
     route: &MtrRouteSnapshot,
@@ -52,12 +52,17 @@ pub fn measure_oba_arrivals(
         .current_time_millis
         .checked_add(offset)
         .ok_or_else(|| input_error("API現在時刻が範囲外です"))?;
-    let depot = local_now
+    let mut depot = local_now
         .div_euclid(86_400_000)
         .checked_mul(86_400_000)
         .and_then(|day| day.checked_add(clock))
         .and_then(|local| local.checked_sub(offset))
         .ok_or_else(|| input_error("車庫発時刻が範囲外です"))?;
+    if depot < response.current_time_millis {
+        depot = depot
+            .checked_add(86_400_000)
+            .ok_or_else(|| input_error("翌日の車庫発時刻が範囲外です"))?;
+    }
     let end = depot
         .checked_add(86_400_000)
         .ok_or_else(|| input_error("車庫発時刻が範囲外です"))?;

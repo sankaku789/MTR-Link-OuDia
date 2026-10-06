@@ -157,11 +157,11 @@ pub(crate) async fn fetch_oba_arrivals(
         "/oba/api/where/arrivals-and-departures-for-stop/{}",
         platform.to_hex()
     ));
-    // 日付入力を追加せず、端末の当日の試験出庫を対象とする。前後1日で日跨ぎも取得。
+    // 過ぎた車庫発は翌日へ送る。翌日の遅い時刻の日跨ぎ到着も漏らさないよう未来2日を取得。
     url.query_pairs_mut()
         .append_pair("dimension", &dimension.to_string())
         .append_pair("minutesBefore", "1440")
-        .append_pair("minutesAfter", "1440");
+        .append_pair("minutesAfter", "2880");
     let response = client
         .get(url)
         .send()

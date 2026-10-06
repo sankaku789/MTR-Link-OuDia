@@ -96,5 +96,5 @@ async fn http_reads_map_and_oba_with_exact_platform_hex_and_shared_endpoint() {
     assert_eq!(response.arrivals[0].arrival, 1791119023597);
     let requests = server.join().unwrap();
     assert!(requests[0].starts_with("GET /mtr/api/map/stations-and-routes?dimension=2 HTTP/1.1"));
-    assert!(requests[1].starts_with("GET /oba/api/where/arrivals-and-departures-for-stop/437E2294003812E9?dimension=2&minutesBefore=1440&minutesAfter=1440 HTTP/1.1"));
+    assert!(requests[1].starts_with("GET /oba/api/where/arrivals-and-departures-for-stop/437E2294003812E9?dimension=2&minutesBefore=1440&minutesAfter=2880 HTTP/1.1"));
 }

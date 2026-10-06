@@ -110,7 +110,7 @@
             <button disabled={busy !== ''} onclick={() => outboundMode = 'manual'}>手動入力</button>
           </div>
           {#if outboundMode === 'measure'}
-            <p>MTR側で既知のリアルタイム車庫発を1本設定し、予定ダイヤを生成してください。走行開始を待つ必要はありません。入力した時間帯で当日の試験出庫を測定します。</p>
+            <p>MTR側で既知のリアルタイム車庫発を1本設定し、予定ダイヤを生成してください。走行開始を待つ必要はありません。入力した時間帯で当日の試験出庫を測定し、車庫発時刻が過ぎている場合は翌日の同時刻を検索します。</p>
             <div class="fields">
               <label>試験列車の車庫発 <input bind:value={depotClock} placeholder="12:00:00" aria-label="試験列車の車庫発" disabled={busy !== ''} /></label>
             </div>

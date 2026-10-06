@@ -92,7 +92,7 @@ impl MtrApiClient for Client {
         assert_eq!(route_id, "0000000000000001");
         assert_eq!(platform_id, "0000000000000009");
         Ok(mtr_oudia_application::ObaArrivalsDto {
-            current_time_millis: 1000,
+            current_time_millis: 0,
             arrivals: vec![mtr_oudia_application::ObaArrivalDto {
                 route_id: mtr_oudia_domain::MtrId::from_java_long(1),
                 platform_id: mtr_oudia_domain::MtrId::from_java_long(9),
@@ -241,7 +241,7 @@ async fn manual_save_and_reload_work_without_any_oudia_file() {
         mtr_oudia_application::OutboundRuntimeSource::Measured
     );
     assert_eq!(measured.setting.as_ref().unwrap().runtime.millis(), 77_000);
-    assert_eq!(measured.setting.as_ref().unwrap().measured_at, 1000);
+    assert_eq!(measured.setting.as_ref().unwrap().measured_at, 0);
 }
 
 #[tokio::test]
