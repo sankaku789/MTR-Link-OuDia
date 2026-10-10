@@ -740,7 +740,15 @@ impl<
                     "OuDia を読み込んでください",
                 )
             })?;
-            let mut templates = templates_for(&source.2, diagram_index)?;
+            let mut templates = if train_number.is_some() && diagram_index.is_none() {
+                let mut all = Vec::new();
+                for index in 0..source.2.document.diagrams.len() {
+                    all.extend(templates_for(&source.2, Some(index))?);
+                }
+                all
+            } else {
+                templates_for(&source.2, diagram_index)?
+            };
             if let Some(number) = train_number {
                 templates.retain(|t| {
                     source.2.document.diagrams[t.diagram_index].trains[t.train_index]
@@ -1104,33 +1112,26 @@ fn templates_for(
     source: &OudiaSource,
     diagram: Option<usize>,
 ) -> Result<Vec<OudiaRouteTemplate>, BusinessError> {
+    if let Some(index) = diagram {
+        if index >= source.document.diagrams.len() {
+            return Err(BusinessError::new(
+                BusinessErrorKind::Validation,
+                "ダイヤ選択が範囲外です",
+            ));
+        }
+        let mut copy = source.document.clone();
+        copy.kijun_dia_index = KijunDiaIndex::Valid(index);
+        return match build_oudia_route_templates(&copy) {
+            ReferenceDiagramSelection::Selected(v) => Ok(v.templates),
+            _ => unreachable!("validated diagram index"),
+        };
+    }
     match build_oudia_route_templates(&source.document) {
-        ReferenceDiagramSelection::Selected(v)
-            if diagram.is_none() || diagram == Some(v.diagram_index) =>
-        {
-            Ok(v.templates)
-        }
-        ReferenceDiagramSelection::Selected(_) => Err(BusinessError::new(
-            BusinessErrorKind::Validation,
-            "ダイヤ選択が一致しません",
+        ReferenceDiagramSelection::Selected(v) => Ok(v.templates),
+        ReferenceDiagramSelection::NeedsSelection { .. } => Err(BusinessError::new(
+            BusinessErrorKind::SelectionRequired,
+            "基準ダイヤを選択してください",
         )),
-        ReferenceDiagramSelection::NeedsSelection { .. } => {
-            let index = diagram.ok_or_else(|| {
-                BusinessError::new(
-                    BusinessErrorKind::SelectionRequired,
-                    "基準ダイヤを選択してください",
-                )
-            })?;
-            let mut copy = source.document.clone();
-            copy.kijun_dia_index = KijunDiaIndex::Valid(index);
-            match build_oudia_route_templates(&copy) {
-                ReferenceDiagramSelection::Selected(v) => Ok(v.templates),
-                _ => Err(BusinessError::new(
-                    BusinessErrorKind::Validation,
-                    "ダイヤ選択が範囲外です",
-                )),
-            }
-        }
     }
 }
 fn snapshot_dto(response: &MtrSnapshotResponse) -> Result<SnapshotDto, BusinessError> {
@@ -1188,10 +1189,9 @@ fn snapshot_dto(response: &MtrSnapshotResponse) -> Result<SnapshotDto, BusinessE
     })
 }
 fn inspection_dto(source: &OudiaSource) -> InspectionDto {
-    let templates = match build_oudia_route_templates(&source.document) {
-        ReferenceDiagramSelection::Selected(v) => v.templates,
-        _ => Vec::new(),
-    };
+    let templates: Vec<_> = (0..source.document.diagrams.len())
+        .flat_map(|index| templates_for(source, Some(index)).expect("existing diagram"))
+        .collect();
     InspectionDto {
         file_type: source.document.file_type.clone(),
         line_name: source

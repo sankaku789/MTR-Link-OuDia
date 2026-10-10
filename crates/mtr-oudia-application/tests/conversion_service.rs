@@ -164,6 +164,75 @@ impl OudiaRepository for NoMatchRepository {
 
 struct TwoTrainTypesRepository;
 struct NumberRepository;
+struct OtherDiagramNumberRepository;
+impl OudiaRepository for OtherDiagramNumberRepository {
+    fn read(&self, path: &Path) -> Result<mtr_oudia_domain::OudiaSource, BusinessError> {
+        let original = String::from_utf8(NumberRepository.read(path)?.bytes).unwrap();
+        let text = format!(
+            "{}Dia.\n{}",
+            original.replace("Ressyabangou=", "UnknownNumber="),
+            original.split_once("Dia.\n").unwrap().1
+        );
+        Ok(parse_oudia(text.into_bytes()).unwrap())
+    }
+}
+
+#[tokio::test]
+async fn number_auto_searches_other_diagrams_and_explicit_diagram_is_respected() {
+    let ports = Ports {
+        saved: Mutex::new(Vec::new()),
+    };
+    let repository = OtherDiagramNumberRepository;
+    let service = ConversionService::new(
+        ConversionSessionStore::new(2),
+        &ports,
+        &ports,
+        &repository,
+        &ports,
+        &ports,
+    );
+    let session = service.create_session();
+    service
+        .fetch_mtr_snapshot(
+            &session,
+            &MtrEndpoint::parse("http://127.0.0.1/").unwrap(),
+            0,
+        )
+        .await
+        .unwrap();
+    let inspection = service
+        .inspect_oudia(&session, Path::new("input.oud2"))
+        .unwrap();
+    assert!(inspection.templates.iter().any(|t| t.diagram_index == 1));
+    for diagram in [None, Some(1)] {
+        let candidates = service
+            .find_route_candidates_by_number(&session, "route", diagram, None, Some("001M"))
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].diagram_index, 1);
+        service
+            .build_preview(&session, Some(&candidates[0].id), None)
+            .unwrap();
+    }
+    assert!(
+        service
+            .find_route_candidates_by_number(&session, "route", Some(0), None, Some("001M"))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        service
+            .find_route_candidates_by_number(&session, "route", Some(2), None, Some("001M"))
+            .is_err()
+    );
+    assert!(
+        service
+            .find_route_candidates(&session, "route", None, None)
+            .unwrap()
+            .iter()
+            .all(|c| c.diagram_index == 0)
+    );
+}
 struct DuplicateNumberRepository;
 impl OudiaRepository for DuplicateNumberRepository {
     fn read(&self, path: &Path) -> Result<mtr_oudia_domain::OudiaSource, BusinessError> {

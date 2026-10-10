@@ -94,7 +94,7 @@
       <label>路線 <select bind:value={route} onchange={chooseRoute} disabled={busy !== ''}><option value={undefined}>選択してください</option>{#if route && !displayRoutes.includes(route)}<option value={route}>{route.name}（選択中・検索対象外）</option>{/if}{#each displayRoutes as item}<option value={item}>{item.name}</option>{/each}</select></label>
       {#if route}
         <div class="fields"><label>書込先の列車番号（任意・完全一致） <input bind:value={trainNumber} oninput={resetFromRoute} placeholder="例: 001M" disabled={busy !== ''} /></label></div>
-        <p class="muted">入力すると、経路と列車番号の両方が一致する列車だけをStep 5に表示します。空欄なら従来どおりです。</p>
+        <p class="muted">入力すると、経路と列車番号の両方が一致する列車だけをStep 5に表示します。ダイヤをApplicationに任せる場合は全ダイヤから検索し、ダイヤを選択した場合はそのダイヤだけを検索します。番号が空欄なら従来どおりです。</p>
         <p>駅数: {route.station_count} / 総運転時分: {milliseconds(route.total_run_millis)} / 総停車時分: {milliseconds(route.total_dwell_millis)}</p>
         <ol>{#each route.stations as station}<li>{station.station_name}（ホーム: {station.platform_name || '記載なし'} / 停車: {milliseconds(station.dwell_millis)} / 次駅まで: {milliseconds(station.run_millis_to_next)}）</li>{/each}</ol>
         <fieldset>
