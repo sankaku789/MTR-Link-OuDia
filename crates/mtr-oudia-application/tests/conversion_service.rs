@@ -132,8 +132,8 @@ impl MtrApiClient for Ports {
             "Route",
             vec!["a".into(), "b".into()],
             vec![
-                MtrStopSnapshot::new("a", "A", "", time(0), Some(time(1_000))).unwrap(),
-                MtrStopSnapshot::new("b", "B", "", time(0), None).unwrap(),
+                MtrStopSnapshot::new("a", "A", "1", time(0), Some(time(1_000))).unwrap(),
+                MtrStopSnapshot::new("b", "B", "1", time(0), None).unwrap(),
             ],
         )
         .unwrap();
@@ -164,6 +164,21 @@ impl OudiaRepository for NoMatchRepository {
 
 struct TwoTrainTypesRepository;
 struct NumberRepository;
+struct TextRepository(String);
+impl OudiaRepository for TextRepository {
+    fn read(&self, _: &Path) -> Result<mtr_oudia_domain::OudiaSource, BusinessError> {
+        Ok(parse_oudia(self.0.clone().into_bytes()).unwrap())
+    }
+}
+struct PrecisionSaver(Mutex<Vec<u8>>);
+impl ValidatedSavePort for PrecisionSaver {
+    fn save(&self, input: &Path, output: &Path, _: [u8; 32], patch: &OudiaPatch) -> Result<SaveReceipt, BusinessError> {
+        let bytes = patch.apply(&NumberRepository.read(input)?.bytes).unwrap();
+        let count = bytes.len() as u64;
+        *self.0.lock().unwrap() = bytes;
+        Ok(SaveReceipt { output_path: output.to_string_lossy().into_owned(), bytes: count, sha256: String::new() })
+    }
+}
 struct OtherDiagramNumberRepository;
 impl OudiaRepository for OtherDiagramNumberRepository {
     fn read(&self, path: &Path) -> Result<mtr_oudia_domain::OudiaSource, BusinessError> {
@@ -248,7 +263,7 @@ impl OudiaRepository for DuplicateNumberRepository {
 }
 impl OudiaRepository for NumberRepository {
     fn read(&self, _: &Path) -> Result<mtr_oudia_domain::OudiaSource, BusinessError> {
-        Ok(parse_oudia(b"FileType=OuDiaSecond.1.16\nKijunDiaIndex=0\nRosen.\nEki.\nEkimei=A\n.\nEki.\nEkimei=B\n.\nEki.\nEkimei=C\n.\n.\nDia.\nKudari.\nRessya.\nRessyabangou=001M\nEkiJikoku=1;1000,1;1001\n.\nRessya.\nRessyabangou=002M\nEkiJikoku=1;1000,1;1001\n.\nRessya.\nRessyabangou=001M\nEkiJikoku=,1;1000,1;1001\n.\n.\n.\n".to_vec()).unwrap())
+        Ok(parse_oudia("FileType=OuDiaSecond.1.16\nKijunDiaIndex=0\nRosen.\nEki.\nEkimei=A\n.\nEki.\nEkimei=B\n.\nEki.\nEkimei=C\n.\n.\nDia.\nKudari.\nRessya.\nRessyabangou=001M\nEkiJikoku=1;081530,1;081600\n.\nRessya.\nRessyabangou=002M\nEkiJikoku=1;1000,1;1001\n.\nRessya.\nRessyabangou=001M\nEkiJikoku=,1;1000,1;1001\n.\n.\n.\n".replace("Ekimei=A\n", "Ekimei=A\nEkiTrack2Cont.\nEkiTrack2.\nTrackRyakusyou=2\n.\nEkiTrack2.\nTrackRyakusyou=1\n.\n.\n").replace("Ekimei=B\n", "Ekimei=B\nEkiTrack2Cont.\nEkiTrack2.\nTrackRyakusyou=1\n.\n.\n").into_bytes()).unwrap())
     }
 }
 
@@ -258,13 +273,14 @@ async fn train_number_requires_exact_number_and_matching_route() {
         saved: Mutex::new(Vec::new()),
     };
     let repository = NumberRepository;
+    let saver = PrecisionSaver(Mutex::new(Vec::new()));
     let service = ConversionService::new(
         ConversionSessionStore::new(2),
         &ports,
         &ports,
         &repository,
         &ports,
-        &ports,
+        &saver,
     );
     let session = service.create_session();
     service
@@ -283,9 +299,14 @@ async fn train_number_requires_exact_number_and_matching_route() {
         .unwrap();
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].train_index, 0);
-    service
+    let preview = service
         .build_preview(&session, Some(&candidates[0].id), None)
         .unwrap();
+    assert_eq!(preview.fixed_base_time, "08:15:30");
+    service.save_conversion(&session, &preview.id, Path::new("precise.oud2"), OperationPolicy::Preserve).unwrap();
+    let saved = String::from_utf8(saver.0.lock().unwrap().clone()).unwrap();
+    assert!(saved.contains("EkiJikoku=1;081530$1,1;081531/$0"), "{saved}");
+    assert!(saved.contains("Ressyabangou=002M\nEkiJikoku=1;1000,1;1001"));
     for number in ["1M", "001", "001m", "999M"] {
         assert!(
             service
@@ -304,6 +325,30 @@ async fn train_number_requires_exact_number_and_matching_route() {
             .unwrap()
             .len()
     );
+}
+
+#[tokio::test]
+async fn precision_rejects_missing_departure_and_unresolved_platforms_but_normal_mode_does_not() {
+    let original = String::from_utf8(NumberRepository.read(Path::new("input.oud2")).unwrap().bytes).unwrap();
+    for invalid in [
+        original.replace("1;081530", "1;081530/"),
+        original.replace("TrackRyakusyou=1", "TrackRyakusyou=9"),
+        original.replace("TrackRyakusyou=2", "TrackRyakusyou=1"),
+    ] {
+        let ports = Ports { saved: Mutex::new(Vec::new()) };
+        let repository = TextRepository(invalid);
+        let service = ConversionService::new(ConversionSessionStore::new(2), &ports, &ports, &repository, &ports, &ports);
+        let session = service.create_session();
+        service.fetch_mtr_snapshot(&session, &MtrEndpoint::parse("http://127.0.0.1/").unwrap(), 0).await.unwrap();
+        service.inspect_oudia(&session, Path::new("input.oud2")).unwrap();
+        let candidates = service.find_route_candidates_by_number(&session, "route", None, None, Some("001M")).unwrap();
+        assert!(service.build_preview(&session, Some(&candidates[0].id), None).is_err());
+        let candidates = service.find_route_candidates(&session, "route", None, None).unwrap();
+        let preview = service.build_preview(&session, Some(&candidates[0].id), None).unwrap();
+        assert_eq!(preview.fixed_base_time, "10:00:00");
+        assert!(!preview.precision_mode);
+        assert!(preview.stops.iter().all(|stop| stop.updated_platform.is_none()));
+    }
 }
 
 #[tokio::test]

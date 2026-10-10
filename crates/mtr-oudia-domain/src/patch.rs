@@ -8,6 +8,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ByteReplacementKind {
     Time,
+    Platform,
     Operation,
 }
 
@@ -121,6 +122,7 @@ pub enum EkiJikokuPatchError {
     TimeShapeMismatch,
     UnsupportedOvernightTime,
     AmbiguousOperation,
+    UnresolvedPlatform,
     InvalidPatch(OudiaPatchError),
 }
 
@@ -139,12 +141,72 @@ impl fmt::Display for EkiJikokuPatchError {
                 formatter.write_str("24時を超える時刻は保存できません")
             }
             Self::AmbiguousOperation => formatter.write_str("Operation行を一意に処理できません"),
+            Self::UnresolvedPlatform => formatter.write_str("駅番線の略称を一意に解決できません"),
             Self::InvalidPatch(error) => write!(formatter, "パッチ検証失敗: {error}"),
         }
     }
 }
 
 impl Error for EkiJikokuPatchError {}
+
+/// 駅ごとの番線略称を完全一致で解決し、対象列車の番線だけを更新する。
+pub fn build_platform_patch(
+    source: &OudiaSource,
+    template: &OudiaRouteTemplate,
+    station_slot_groups: &[Vec<usize>],
+    platforms: &[String],
+) -> Result<OudiaPatch, EkiJikokuPatchError> {
+    let train = source
+        .document
+        .diagrams
+        .get(template.diagram_index)
+        .and_then(|diagram| diagram.trains.get(template.train_index))
+        .ok_or(EkiJikokuPatchError::TargetNotFound)?;
+    if train.section_range != template.source_train_range || train.direction != template.direction {
+        return Err(EkiJikokuPatchError::TargetNotFound);
+    }
+    if station_slot_groups.len() != platforms.len()
+        || station_slot_groups.iter().flatten().copied().collect::<Vec<_>>()
+            != template.active_station_slots
+    {
+        return Err(EkiJikokuPatchError::CellStructureMismatch);
+    }
+    let mut replacements = Vec::new();
+    for (slots, platform) in station_slot_groups.iter().zip(platforms) {
+        for &slot in slots {
+            let station = source.document.station_slots.get(slot)
+                .ok_or(EkiJikokuPatchError::TargetNotFound)?;
+            let matches = station.track_abbreviations.iter().enumerate()
+                .filter(|(_, abbreviation)| !platform.is_empty() && *abbreviation == platform)
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let [track] = matches.as_slice() else {
+                return Err(EkiJikokuPatchError::UnresolvedPlatform);
+            };
+            let cell_index = match train.direction {
+                crate::OudiaDirection::Kudari => slot,
+                crate::OudiaDirection::Nobori => source.document.station_slots.len() - 1 - slot,
+            };
+            let cell = train.eki_jikoku.cells.get(cell_index)
+                .ok_or(EkiJikokuPatchError::TargetNotFound)?;
+            let raw = &source.bytes[cell.source_range.start()..cell.source_range.end()];
+            let (start, replacement) = if let Some(dollar) = raw.iter().position(|byte| *byte == b'$') {
+                (cell.source_range.start() + dollar + 1, track.to_string())
+            } else {
+                (cell.source_range.end(), format!("${track}"))
+            };
+            let range = SourceRange::new(start, cell.source_range.end())
+                .map_err(|_| EkiJikokuPatchError::CellStructureMismatch)?;
+            replacements.push(ByteReplacement {
+                range,
+                expected: source.bytes[start..range.end()].to_vec(),
+                replacement: replacement.into_bytes(),
+                kind: ByteReplacementKind::Platform,
+            });
+        }
+    }
+    OudiaPatch::new(replacements).map_err(EkiJikokuPatchError::InvalidPatch)
+}
 
 /// テンプレートの active cell だけを、既存の時刻文字列範囲で置換する。
 pub fn build_eki_jikoku_patch(

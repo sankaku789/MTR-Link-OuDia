@@ -394,6 +394,8 @@ pub struct StationMappingDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreviewDto {
     #[serde(default)]
+    pub precision_mode: bool,
+    #[serde(default)]
     pub outbound: Option<OutboundPreviewDto>,
     pub id: PreviewId,
     pub fixed_base_time: String,
@@ -412,6 +414,7 @@ pub struct OutboundPreviewDto {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreviewStopDto {
+    pub updated_platform: Option<String>,
     pub station: String,
     pub existing_arrival: Option<String>,
     pub existing_departure: Option<String>,
@@ -449,12 +452,14 @@ struct Session {
 }
 #[derive(Clone)]
 struct Candidate {
+    precision_mode: bool,
     revision: u64,
     template: OudiaRouteTemplate,
     mapping: Vec<StationMappingDto>,
 }
 #[derive(Clone)]
 struct Preview {
+    platform_patch: Option<OudiaPatch>,
     first_station_dwell: mtr_oudia_domain::ServiceTimeMillis,
     outbound_setting: Option<OutboundRuntimeSetting>,
     operation_policy: OperationPolicy,
@@ -807,6 +812,7 @@ impl<
                 s.candidates.insert(
                     cid.clone(),
                     Candidate {
+                        precision_mode: train_number.is_some(),
                         revision: s.revision,
                         template,
                         mapping: mapping.clone(),
@@ -822,6 +828,7 @@ impl<
                     s.candidates.insert(
                         cid.clone(),
                         Candidate {
+                            precision_mode: false,
                             revision: s.revision,
                             template: template.clone(),
                             mapping: Vec::new(),
@@ -916,7 +923,6 @@ impl<
             for group in &mut station_slot_groups {
                 group.sort_by_key(|slot| slot_positions.get(slot).copied().unwrap_or(usize::MAX));
             }
-            let timetable = generate_timetable(route).map_err(domain_error)?;
             let source = &s
                 .source
                 .as_ref()
@@ -927,6 +933,21 @@ impl<
                     )
                 })?
                 .2;
+            let timetable = if candidate.precision_mode {
+                let train = &source.document.diagrams[candidate.template.diagram_index].trains[candidate.template.train_index];
+                let departure = train.eki_jikoku.cells.iter().find(|cell| cell.is_timetable_active())
+                    .and_then(|cell| cell.departure)
+                    .ok_or_else(|| BusinessError::new(BusinessErrorKind::Validation, "精密入力対象の始発駅発時刻がありません"))?;
+                let millis = (i64::from(departure.hour) * 3600 + i64::from(departure.minute) * 60 + i64::from(departure.second)) * 1000;
+                mtr_oudia_domain::generate_timetable_at(route, mtr_oudia_domain::ServiceTimeMillis::new(millis).map_err(domain_error)?).map_err(domain_error)?
+            } else {
+                generate_timetable(route).map_err(domain_error)?
+            };
+            let platform_patch = if candidate.precision_mode {
+                Some(mtr_oudia_domain::build_platform_patch(source, &candidate.template, &station_slot_groups,
+                    &route.stops.iter().map(|stop| stop.platform_name.clone()).collect::<Vec<_>>())
+                    .map_err(|error| BusinessError::new(BusinessErrorKind::Validation, &error.to_string()))?)
+            } else { None };
             let operation_present = source
                 .document
                 .properties
@@ -935,6 +956,12 @@ impl<
             let pid = PreviewId(format!("preview-{}-{}", s.revision, s.previews.len()));
             let first_station_dwell = route.stops[0].dwell_millis;
             let mut dto = preview_dto(pid.clone(), route, &timetable, operation_present);
+            dto.precision_mode = candidate.precision_mode;
+            if candidate.precision_mode {
+                for (stop, original) in dto.stops.iter_mut().zip(&route.stops) {
+                    stop.updated_platform = Some(original.platform_name.clone());
+                }
+            }
             let outbound_setting = if generate_outbound {
                 let dimension = s.snapshot.as_ref().unwrap().snapshot.dimension;
                 let status = outbound::status_for_route(dimension, route, &self.settings.load()?)?;
@@ -993,9 +1020,23 @@ impl<
             } else {
                 None
             };
+            if let Some(platform_patch) = &platform_patch {
+                let time_patch = build_conversion_patch(
+                    source,
+                    &candidate.template,
+                    &timetable,
+                    &station_slot_groups,
+                    policy,
+                    outbound_setting.as_ref().map(|setting| setting.runtime),
+                    first_station_dwell,
+                ).map_err(|error| BusinessError::new(BusinessErrorKind::Validation, &error.to_string()))?;
+                OudiaPatch::new(time_patch.replacements().iter().chain(platform_patch.replacements()).cloned().collect())
+                    .map_err(|error| BusinessError::new(BusinessErrorKind::SaveVerification, &error.to_string()))?;
+            }
             s.previews.insert(
                 pid,
                 Preview {
+                    platform_patch,
                     first_station_dwell,
                     outbound_setting,
                     operation_policy: policy,
@@ -1085,6 +1126,10 @@ impl<
                 detail: Some(error.to_string()),
             }
         })?;
+        let patch = if let Some(platform_patch) = &preview.platform_patch {
+            OudiaPatch::new(patch.replacements().iter().chain(platform_patch.replacements()).cloned().collect())
+                .map_err(|error| BusinessError::new(BusinessErrorKind::SaveVerification, &error.to_string()))?
+        } else { patch };
         self.saver.save(&input, output, hash, &patch)
     }
 }
@@ -1308,14 +1353,16 @@ fn preview_dto(
     operation_present: bool,
 ) -> PreviewDto {
     PreviewDto {
+        precision_mode: false,
         outbound: None,
         id,
-        fixed_base_time: "10:00:00".into(),
+        fixed_base_time: timetable.stops[0].rounded_departure_display.clone().unwrap_or_default(),
         stops: timetable
             .stops
             .iter()
             .zip(&route.stops)
             .map(|(t, r)| PreviewStopDto {
+                updated_platform: None,
                 station: r.station_name.clone(),
                 existing_arrival: None,
                 existing_departure: None,

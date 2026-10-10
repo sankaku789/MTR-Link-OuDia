@@ -26,6 +26,14 @@ pub struct GeneratedTimetable {
 
 /// MTR 正規化路線から時刻表を生成する。
 pub fn generate_timetable(route: &MtrRouteSnapshot) -> Result<GeneratedTimetable, DomainError> {
+    generate_timetable_at(route, FIXED_START_TIME)
+}
+
+/// 指定した始発駅発時刻を基準に生成する。
+pub fn generate_timetable_at(
+    route: &MtrRouteSnapshot,
+    start: ServiceTimeMillis,
+) -> Result<GeneratedTimetable, DomainError> {
     let dwells = route
         .stops
         .iter()
@@ -38,13 +46,21 @@ pub fn generate_timetable(route: &MtrRouteSnapshot) -> Result<GeneratedTimetable
         .ok_or(DomainError::InvalidTimetable {
             reason: "駅間運転時分がありません",
         })?;
-    generate_timetable_from_durations(&dwells, &runs)
+    generate_timetable_from_durations_at(&dwells, &runs, start)
 }
 
 /// 停車時分と駅間運転時分から時刻表を生成する。
 pub fn generate_timetable_from_durations(
     dwells: &[ServiceTimeMillis],
     runs: &[ServiceTimeMillis],
+) -> Result<GeneratedTimetable, DomainError> {
+    generate_timetable_from_durations_at(dwells, runs, FIXED_START_TIME)
+}
+
+pub fn generate_timetable_from_durations_at(
+    dwells: &[ServiceTimeMillis],
+    runs: &[ServiceTimeMillis],
+    start: ServiceTimeMillis,
 ) -> Result<GeneratedTimetable, DomainError> {
     if dwells.len() < 2 {
         return Err(DomainError::InvalidTimetable {
@@ -56,7 +72,7 @@ pub fn generate_timetable_from_durations(
             reason: "駅間運転時分数が駅数と一致しません",
         });
     }
-    let mut current = FIXED_START_TIME;
+    let mut current = start;
     let mut stops = Vec::with_capacity(dwells.len());
     stops.push(build_stop(0, None, Some(current))?);
     for index in 1..dwells.len() {

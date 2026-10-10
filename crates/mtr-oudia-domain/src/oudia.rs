@@ -81,6 +81,7 @@ pub struct OudiaDocument {
 pub struct OudiaStationSlot {
     pub name: String,
     pub name_range: SourceRange,
+    pub track_abbreviations: Vec<String>,
 }
 
 /// 基準ダイヤ指定の読込状態。
@@ -293,8 +294,14 @@ pub fn parse_oudia(bytes: Vec<u8>) -> Result<OudiaSource, DomainError> {
                     document.station_slots.push(OudiaStationSlot {
                         name: String::new(),
                         name_range: SourceRange::new(line.end, line.end)?,
+                        track_abbreviations: Vec::new(),
                     });
                     current_station = Some(document.station_slots.len() - 1);
+                }
+                "EkiTrack2" => {
+                    if let Some(station) = current_station {
+                        document.station_slots[station].track_abbreviations.push(String::new());
+                    }
                 }
                 _ => {}
             }
@@ -345,6 +352,13 @@ pub fn parse_oudia(bytes: Vec<u8>) -> Result<OudiaSource, DomainError> {
             {
                 document.station_slots[station].name = property.value.clone();
                 document.station_slots[station].name_range = property.value_range;
+            }
+            if property.key == "TrackRyakusyou"
+                && sections.last().is_some_and(|section| section.name == "EkiTrack2")
+                && let Some(station) = current_station
+                && let Some(track) = document.station_slots[station].track_abbreviations.last_mut()
+            {
+                *track = property.value.clone();
             }
             if property.key == "Ressyabangou"
                 && let (Some(diagram), Some(train)) = (current_diagram, current_train)
