@@ -6,6 +6,76 @@ const SIMPLE_116: &[u8] = include_bytes!("../../../fixtures/oudia/filetype-1.16/
 const SIMPLE_117: &[u8] = include_bytes!("../../../fixtures/oudia/filetype-1.17/simple.oud2");
 
 #[test]
+fn reads_train_number_as_text_without_changing_source() {
+    let bytes = b"FileType=OuDiaSecond.1.16\nDia.\nKudari.\nRessya.\nRessyabangou=001M\nEkiJikoku=1;1000\n.\nRessya.\nEkiJikoku=1;1001\n.\n.\n.\n";
+    let source = parse_oudia(bytes.to_vec()).unwrap();
+    assert_eq!(
+        source.document.diagrams[0].trains[0]
+            .train_number
+            .as_deref(),
+        Some("001M")
+    );
+    assert_eq!(source.document.diagrams[0].trains[1].train_number, None);
+    assert_eq!(source.unchanged_bytes(), bytes);
+}
+
+#[test]
+fn manual_train_number_fixture_has_three_trains_and_preserves_non_targets() {
+    use mtr_oudia_domain::{
+        GeneratedStop, GeneratedTimetable, OperationPolicy, ReferenceDiagramSelection,
+        build_eki_jikoku_patch, build_oudia_route_templates,
+    };
+    let bytes = include_bytes!("../../../fixtures/oudia/train-number-selection.oud2");
+    let source = parse_oudia(bytes.to_vec()).unwrap();
+    let trains = &source.document.diagrams[0].trains;
+    assert_eq!(trains.len(), 3);
+    assert_eq!(trains[0].train_number.as_deref(), Some("001M"));
+    assert_eq!(trains[1].train_number.as_deref(), Some("002M"));
+    assert_eq!(trains[2].train_number.as_deref(), Some("001M"));
+    assert_eq!(source.document.station_slots.len(), 8);
+    assert_eq!(source.unchanged_bytes(), bytes);
+    let ReferenceDiagramSelection::Selected(templates) =
+        build_oudia_route_templates(&source.document)
+    else {
+        panic!("templates")
+    };
+    let timetable = GeneratedTimetable {
+        crosses_midnight: false,
+        stops: (0..8)
+            .map(|i| GeneratedStop {
+                station_index: i,
+                arrival: None,
+                departure: None,
+                rounded_arrival_seconds: (i > 0).then_some(36000),
+                rounded_departure_seconds: (i < 7).then_some(36000),
+                rounded_arrival_display: (i > 0).then(|| "10:00:00".into()),
+                rounded_departure_display: (i < 7).then(|| "10:00:00".into()),
+            })
+            .collect(),
+    };
+    let patch = build_eki_jikoku_patch(
+        &source,
+        &templates.templates[0],
+        &timetable,
+        OperationPolicy::Preserve,
+    )
+    .unwrap();
+    let saved = parse_oudia(patch.apply(&source.bytes).unwrap()).unwrap();
+    assert_eq!(
+        saved.document.diagrams[0].trains[0].train_number.as_deref(),
+        Some("001M")
+    );
+    for i in [1, 2] {
+        let before = trains[i].section_range;
+        let after = saved.document.diagrams[0].trains[i].section_range;
+        assert_eq!(
+            &source.bytes[before.start()..before.end()],
+            &saved.bytes[after.start()..after.end()]
+        );
+    }
+}
+
+#[test]
 fn preserves_utf8_lf_input_bytes_and_extracts_the_reference_train() {
     let source = parse_oudia(SIMPLE_116.to_vec()).unwrap();
 

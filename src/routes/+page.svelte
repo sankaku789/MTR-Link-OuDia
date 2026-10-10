@@ -10,6 +10,7 @@
   let sessionId = $state<string>(); let endpoint = $state(''); let dimension = $state(0);
   let snapshot = $state<Snapshot>(); let route = $state<Route>(); let oudiaPath = $state(''); let inspection = $state<Inspection>();
   let routeQuery = $state('');
+  let trainNumber = $state('');
   const displayRoutes = $derived(filterRoutesForDisplay(sortRoutesForDisplay(snapshot?.routes ?? []), routeQuery));
   let diagramIndex = $state<number>(); let trainType = $state<number>(); let candidates = $state<Candidate[]>([]); let candidate = $state<Candidate>();
   let manualMode = $state(false); let manualSlots = $state<number[][]>([]);
@@ -74,7 +75,7 @@
   function fetchSnapshot() { const baseUrl = endpoint.trim(); if (!baseUrl) { error = 'API URLを入力してください。'; return; } return task('MTR スナップショットを取得中です。', async () => { const id = await ensureSession(); snapshot = await api.snapshot(id, baseUrl, dimension); endpoint = baseUrl; resetFromSnapshot(); }); }
   async function chooseOudia() { if (!requireDesktop()) return; const selected = await open({ multiple: false, filters: [{ name: 'OuDia', extensions: ['oud2'] }] }); if (typeof selected === 'string' && sessionId) { oudiaPath = selected; await task('OuDia ファイルを解析中です。', async () => { inspection = await api.inspect(sessionId!, oudiaPath); resetFromOudia(); }); } }
   function reloadOudia() { if (!sessionId || !oudiaPath) return; return task('同じ OuDia ファイルを再解析中です。', async () => { inspection = await api.inspect(sessionId!, oudiaPath); resetFromOudia(); }); }
-  function findCandidates() { if (!sessionId || !route || !inspection) return; task('経路候補を検索中です。', async () => { candidates = await api.candidates(sessionId!, route!.id, diagramIndex, trainType); candidate = undefined; manualMode = false; manualSlots = []; preview = undefined; }); }
+  function findCandidates() { if (!sessionId || !route || !inspection) return; task('経路候補を検索中です。', async () => { candidates = await api.candidates(sessionId!, route!.id, diagramIndex, trainType, trainNumber); candidate = undefined; manualMode = false; manualSlots = []; preview = undefined; }); }
   function buildPreview() { if (!sessionId || !candidate || manualIssues().length) return; const mappings = manualMode ? manualSlots.flatMap((slots, index) => slots.map((slot) => ({ mtr_station_index: index, oudia_station_slot: slot }))) : undefined; task('時刻プレビューを生成中です。', async () => { preview = await api.preview(sessionId!, candidate!.id, mappings, generateOutbound, policy); receipt = undefined; }); }
   function saveFile() { if (!sessionId || !preview || !oudiaPath) return; task('元の OuDia ファイルを安全に置換中です。', async () => { receipt = await api.save(sessionId!, preview!.id, oudiaPath, policy); }); }
 </script>
@@ -92,6 +93,8 @@
       <p class="muted" role="status">{displayRoutes.length}件{displayRoutes.length === 0 ? '：一致する路線がありません。' : ''}</p>
       <label>路線 <select bind:value={route} onchange={chooseRoute} disabled={busy !== ''}><option value={undefined}>選択してください</option>{#if route && !displayRoutes.includes(route)}<option value={route}>{route.name}（選択中・検索対象外）</option>{/if}{#each displayRoutes as item}<option value={item}>{item.name}</option>{/each}</select></label>
       {#if route}
+        <div class="fields"><label>書込先の列車番号（任意・完全一致） <input bind:value={trainNumber} oninput={resetFromRoute} placeholder="例: 001M" disabled={busy !== ''} /></label></div>
+        <p class="muted">入力すると、経路と列車番号の両方が一致する列車だけをStep 5に表示します。空欄なら従来どおりです。</p>
         <p>駅数: {route.station_count} / 総運転時分: {milliseconds(route.total_run_millis)} / 総停車時分: {milliseconds(route.total_dwell_millis)}</p>
         <ol>{#each route.stations as station}<li>{station.station_name}（ホーム: {station.platform_name || '記載なし'} / 停車: {milliseconds(station.dwell_millis)} / 次駅まで: {milliseconds(station.run_millis_to_next)}）</li>{/each}</ol>
         <fieldset>

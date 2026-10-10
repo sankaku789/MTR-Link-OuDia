@@ -706,6 +706,18 @@ impl<
         diagram_index: Option<usize>,
         train_type: Option<usize>,
     ) -> Result<Vec<RouteCandidateDto>, BusinessError> {
+        self.find_route_candidates_by_number(id, route_id, diagram_index, train_type, None)
+    }
+
+    pub fn find_route_candidates_by_number(
+        &self,
+        id: &SessionId,
+        route_id: &str,
+        diagram_index: Option<usize>,
+        train_type: Option<usize>,
+        train_number: Option<&str>,
+    ) -> Result<Vec<RouteCandidateDto>, BusinessError> {
+        let train_number = train_number.filter(|number| !number.is_empty());
         let aliases = self.settings.load()?.station_aliases;
         self.store.update(id, |s| {
             let snapshot = s.snapshot.as_ref().ok_or_else(|| {
@@ -729,6 +741,14 @@ impl<
                 )
             })?;
             let mut templates = templates_for(&source.2, diagram_index)?;
+            if let Some(number) = train_number {
+                templates.retain(|t| {
+                    source.2.document.diagrams[t.diagram_index].trains[t.train_index]
+                        .train_number
+                        .as_deref()
+                        == Some(number)
+                });
+            }
             if let Some(train_type) = train_type {
                 templates.retain(|template| template.train_type_index == Some(train_type));
             }
@@ -753,6 +773,11 @@ impl<
             };
             let mut result = Vec::new();
             for (candidate, auto_selected) in candidates {
+                if train_number.is_some()
+                    && candidate.rank == mtr_oudia_domain::RouteMatchRank::Partial
+                {
+                    continue;
+                }
                 let template = templates
                     .iter()
                     .find(|t| {
@@ -781,7 +806,7 @@ impl<
                 );
                 result.push(candidate_dto(cid, candidate, mapping, auto_selected));
             }
-            if result.is_empty() {
+            if result.is_empty() && train_number.is_none() {
                 // 自動照合が不成立でも、既存列車を指定して手動駅対応を安全に確定できる。
                 for template in templates {
                     let cid =

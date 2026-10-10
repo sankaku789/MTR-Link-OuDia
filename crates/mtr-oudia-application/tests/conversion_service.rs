@@ -163,6 +163,116 @@ impl OudiaRepository for NoMatchRepository {
 }
 
 struct TwoTrainTypesRepository;
+struct NumberRepository;
+struct DuplicateNumberRepository;
+impl OudiaRepository for DuplicateNumberRepository {
+    fn read(&self, path: &Path) -> Result<mtr_oudia_domain::OudiaSource, BusinessError> {
+        let source = NumberRepository.read(path)?;
+        Ok(parse_oudia(
+            String::from_utf8(source.bytes)
+                .unwrap()
+                .replace("002M", "001M")
+                .into_bytes(),
+        )
+        .unwrap())
+    }
+}
+impl OudiaRepository for NumberRepository {
+    fn read(&self, _: &Path) -> Result<mtr_oudia_domain::OudiaSource, BusinessError> {
+        Ok(parse_oudia(b"FileType=OuDiaSecond.1.16\nKijunDiaIndex=0\nRosen.\nEki.\nEkimei=A\n.\nEki.\nEkimei=B\n.\nEki.\nEkimei=C\n.\n.\nDia.\nKudari.\nRessya.\nRessyabangou=001M\nEkiJikoku=1;1000,1;1001\n.\nRessya.\nRessyabangou=002M\nEkiJikoku=1;1000,1;1001\n.\nRessya.\nRessyabangou=001M\nEkiJikoku=,1;1000,1;1001\n.\n.\n.\n".to_vec()).unwrap())
+    }
+}
+
+#[tokio::test]
+async fn train_number_requires_exact_number_and_matching_route() {
+    let ports = Ports {
+        saved: Mutex::new(Vec::new()),
+    };
+    let repository = NumberRepository;
+    let service = ConversionService::new(
+        ConversionSessionStore::new(2),
+        &ports,
+        &ports,
+        &repository,
+        &ports,
+        &ports,
+    );
+    let session = service.create_session();
+    service
+        .fetch_mtr_snapshot(
+            &session,
+            &MtrEndpoint::parse("http://127.0.0.1/").unwrap(),
+            0,
+        )
+        .await
+        .unwrap();
+    service
+        .inspect_oudia(&session, Path::new("input.oud2"))
+        .unwrap();
+    let candidates = service
+        .find_route_candidates_by_number(&session, "route", None, None, Some("001M"))
+        .unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].train_index, 0);
+    service
+        .build_preview(&session, Some(&candidates[0].id), None)
+        .unwrap();
+    for number in ["1M", "001", "001m", "999M"] {
+        assert!(
+            service
+                .find_route_candidates_by_number(&session, "route", None, None, Some(number))
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        service
+            .find_route_candidates_by_number(&session, "route", None, None, Some(""))
+            .unwrap()
+            .len(),
+        service
+            .find_route_candidates(&session, "route", None, None)
+            .unwrap()
+            .len()
+    );
+}
+
+#[tokio::test]
+async fn duplicate_number_and_route_remain_explicit_candidates() {
+    let ports = Ports {
+        saved: Mutex::new(Vec::new()),
+    };
+    let repository = DuplicateNumberRepository;
+    let service = ConversionService::new(
+        ConversionSessionStore::new(2),
+        &ports,
+        &ports,
+        &repository,
+        &ports,
+        &ports,
+    );
+    let session = service.create_session();
+    service
+        .fetch_mtr_snapshot(
+            &session,
+            &MtrEndpoint::parse("http://127.0.0.1/").unwrap(),
+            0,
+        )
+        .await
+        .unwrap();
+    service
+        .inspect_oudia(&session, Path::new("input.oud2"))
+        .unwrap();
+    let candidates = service
+        .find_route_candidates_by_number(&session, "route", None, None, Some("001M"))
+        .unwrap();
+    assert_eq!(candidates.len(), 2);
+    assert!(
+        candidates
+            .iter()
+            .all(|c| !c.auto_selected && !c.manual_only)
+    );
+}
 impl OudiaRepository for TwoTrainTypesRepository {
     fn read(&self, _: &Path) -> Result<mtr_oudia_domain::OudiaSource, BusinessError> {
         Ok(parse_oudia(

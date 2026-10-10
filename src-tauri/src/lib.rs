@@ -143,6 +143,7 @@ pub struct CandidatesRequest {
     route_id: String,
     diagram_index: Option<usize>,
     train_type: Option<usize>,
+    train_number: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -282,11 +283,12 @@ fn find_route_candidates(
 ) -> Result<Vec<mtr_oudia_application::RouteCandidateDto>, ErrorDto> {
     state
         .service
-        .find_route_candidates(
+        .find_route_candidates_by_number(
             &SessionId(input.session_id),
             &input.route_id,
             input.diagram_index,
             input.train_type,
+            input.train_number.as_deref(),
         )
         .map_err(Into::into)
 }
@@ -335,7 +337,7 @@ fn operation_policy(value: &str) -> Result<OperationPolicy, ErrorDto> {
                 kind: "Validation".into(),
                 message: "Operation 方針が不正です".into(),
                 detail: None,
-            })
+            });
         }
     })
 }

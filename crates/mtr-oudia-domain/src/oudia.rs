@@ -130,6 +130,7 @@ pub struct OudiaDiagram {
 /// 方向付き列車。
 #[derive(Debug, Clone)]
 pub struct OudiaTrain {
+    pub train_number: Option<String>,
     pub direction: OudiaDirection,
     pub section_range: SourceRange,
     /// `Ressyasyubetsu` が数値として取得できた場合の種別インデックス。
@@ -277,6 +278,7 @@ pub fn parse_oudia(bytes: Vec<u8>) -> Result<OudiaSource, DomainError> {
                         });
                     };
                     document.diagrams[diagram].trains.push(OudiaTrain {
+                        train_number: None,
                         direction,
                         section_range: SourceRange::new(line.start, line.end)?,
                         train_type_index: None,
@@ -343,6 +345,12 @@ pub fn parse_oudia(bytes: Vec<u8>) -> Result<OudiaSource, DomainError> {
             {
                 document.station_slots[station].name = property.value.clone();
                 document.station_slots[station].name_range = property.value_range;
+            }
+            if property.key == "Ressyabangou"
+                && let (Some(diagram), Some(train)) = (current_diagram, current_train)
+            {
+                document.diagrams[diagram].trains[train].train_number =
+                    Some(property.value.clone());
             }
             document.properties.push(property);
             continue;

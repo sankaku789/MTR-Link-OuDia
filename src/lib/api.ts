@@ -68,8 +68,8 @@ export const api = {
     if (!inspection) throw new Error('OuDiaの解析結果を取得できませんでした。');
     return inspection;
   },
-  candidates: (sessionId: string, routeId: string, diagramIndex?: number, trainType?: number) =>
-    call<Candidate[]>('find_route_candidates', { sessionId, routeId, diagramIndex, trainType }),
+  candidates: (sessionId: string, routeId: string, diagramIndex?: number, trainType?: number, trainNumber?: string) =>
+    call<Candidate[]>('find_route_candidates', { sessionId, routeId, diagramIndex, trainType, trainNumber }),
   preview: (sessionId: string, candidateId: string, manualMappings?: { mtr_station_index: number; oudia_station_slot: number }[], generateOutbound = false, policy = 'preserve') =>
     call<Preview>('build_preview', { sessionId, candidateId, manualMappings: manualMappings ? { station_mappings: manualMappings } : undefined, generateOutbound, policy }),
   save: (sessionId: string, previewId: string, outputPath: string, policy: string) =>
