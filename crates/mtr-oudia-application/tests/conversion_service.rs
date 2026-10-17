@@ -172,11 +172,21 @@ impl OudiaRepository for TextRepository {
 }
 struct PrecisionSaver(Mutex<Vec<u8>>);
 impl ValidatedSavePort for PrecisionSaver {
-    fn save(&self, input: &Path, output: &Path, _: [u8; 32], patch: &OudiaPatch) -> Result<SaveReceipt, BusinessError> {
+    fn save(
+        &self,
+        input: &Path,
+        output: &Path,
+        _: [u8; 32],
+        patch: &OudiaPatch,
+    ) -> Result<SaveReceipt, BusinessError> {
         let bytes = patch.apply(&NumberRepository.read(input)?.bytes).unwrap();
         let count = bytes.len() as u64;
         *self.0.lock().unwrap() = bytes;
-        Ok(SaveReceipt { output_path: output.to_string_lossy().into_owned(), bytes: count, sha256: String::new() })
+        Ok(SaveReceipt {
+            output_path: output.to_string_lossy().into_owned(),
+            bytes: count,
+            sha256: String::new(),
+        })
     }
 }
 struct OtherDiagramNumberRepository;
@@ -303,9 +313,19 @@ async fn train_number_requires_exact_number_and_matching_route() {
         .build_preview(&session, Some(&candidates[0].id), None)
         .unwrap();
     assert_eq!(preview.fixed_base_time, "08:15:30");
-    service.save_conversion(&session, &preview.id, Path::new("precise.oud2"), OperationPolicy::Preserve).unwrap();
+    service
+        .save_conversion(
+            &session,
+            &preview.id,
+            Path::new("precise.oud2"),
+            OperationPolicy::Preserve,
+        )
+        .unwrap();
     let saved = String::from_utf8(saver.0.lock().unwrap().clone()).unwrap();
-    assert!(saved.contains("EkiJikoku=1;081530$1,1;081531/$0"), "{saved}");
+    assert!(
+        saved.contains("EkiJikoku=1;081530$1,1;081531/$0"),
+        "{saved}"
+    );
     assert!(saved.contains("Ressyabangou=002M\nEkiJikoku=1;1000,1;1001"));
     for number in ["1M", "001", "001m", "999M"] {
         assert!(
@@ -329,25 +349,64 @@ async fn train_number_requires_exact_number_and_matching_route() {
 
 #[tokio::test]
 async fn precision_rejects_missing_departure_and_unresolved_platforms_but_normal_mode_does_not() {
-    let original = String::from_utf8(NumberRepository.read(Path::new("input.oud2")).unwrap().bytes).unwrap();
+    let original = String::from_utf8(
+        NumberRepository
+            .read(Path::new("input.oud2"))
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
     for invalid in [
         original.replace("1;081530", "1;081530/"),
         original.replace("TrackRyakusyou=1", "TrackRyakusyou=9"),
         original.replace("TrackRyakusyou=2", "TrackRyakusyou=1"),
     ] {
-        let ports = Ports { saved: Mutex::new(Vec::new()) };
+        let ports = Ports {
+            saved: Mutex::new(Vec::new()),
+        };
         let repository = TextRepository(invalid);
-        let service = ConversionService::new(ConversionSessionStore::new(2), &ports, &ports, &repository, &ports, &ports);
+        let service = ConversionService::new(
+            ConversionSessionStore::new(2),
+            &ports,
+            &ports,
+            &repository,
+            &ports,
+            &ports,
+        );
         let session = service.create_session();
-        service.fetch_mtr_snapshot(&session, &MtrEndpoint::parse("http://127.0.0.1/").unwrap(), 0).await.unwrap();
-        service.inspect_oudia(&session, Path::new("input.oud2")).unwrap();
-        let candidates = service.find_route_candidates_by_number(&session, "route", None, None, Some("001M")).unwrap();
-        assert!(service.build_preview(&session, Some(&candidates[0].id), None).is_err());
-        let candidates = service.find_route_candidates(&session, "route", None, None).unwrap();
-        let preview = service.build_preview(&session, Some(&candidates[0].id), None).unwrap();
+        service
+            .fetch_mtr_snapshot(
+                &session,
+                &MtrEndpoint::parse("http://127.0.0.1/").unwrap(),
+                0,
+            )
+            .await
+            .unwrap();
+        service
+            .inspect_oudia(&session, Path::new("input.oud2"))
+            .unwrap();
+        let candidates = service
+            .find_route_candidates_by_number(&session, "route", None, None, Some("001M"))
+            .unwrap();
+        assert!(
+            service
+                .build_preview(&session, Some(&candidates[0].id), None)
+                .is_err()
+        );
+        let candidates = service
+            .find_route_candidates(&session, "route", None, None)
+            .unwrap();
+        let preview = service
+            .build_preview(&session, Some(&candidates[0].id), None)
+            .unwrap();
         assert_eq!(preview.fixed_base_time, "10:00:00");
         assert!(!preview.precision_mode);
-        assert!(preview.stops.iter().all(|stop| stop.updated_platform.is_none()));
+        assert!(
+            preview
+                .stops
+                .iter()
+                .all(|stop| stop.updated_platform.is_none())
+        );
     }
 }
 

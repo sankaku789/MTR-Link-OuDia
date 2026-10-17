@@ -934,20 +934,51 @@ impl<
                 })?
                 .2;
             let timetable = if candidate.precision_mode {
-                let train = &source.document.diagrams[candidate.template.diagram_index].trains[candidate.template.train_index];
-                let departure = train.eki_jikoku.cells.iter().find(|cell| cell.is_timetable_active())
+                let train = &source.document.diagrams[candidate.template.diagram_index].trains
+                    [candidate.template.train_index];
+                let departure = train
+                    .eki_jikoku
+                    .cells
+                    .iter()
+                    .find(|cell| cell.is_timetable_active())
                     .and_then(|cell| cell.departure)
-                    .ok_or_else(|| BusinessError::new(BusinessErrorKind::Validation, "精密入力対象の始発駅発時刻がありません"))?;
-                let millis = (i64::from(departure.hour) * 3600 + i64::from(departure.minute) * 60 + i64::from(departure.second)) * 1000;
-                mtr_oudia_domain::generate_timetable_at(route, mtr_oudia_domain::ServiceTimeMillis::new(millis).map_err(domain_error)?).map_err(domain_error)?
+                    .ok_or_else(|| {
+                        BusinessError::new(
+                            BusinessErrorKind::Validation,
+                            "精密入力対象の始発駅発時刻がありません",
+                        )
+                    })?;
+                let millis = (i64::from(departure.hour) * 3600
+                    + i64::from(departure.minute) * 60
+                    + i64::from(departure.second))
+                    * 1000;
+                mtr_oudia_domain::generate_timetable_at(
+                    route,
+                    mtr_oudia_domain::ServiceTimeMillis::new(millis).map_err(domain_error)?,
+                )
+                .map_err(domain_error)?
             } else {
                 generate_timetable(route).map_err(domain_error)?
             };
             let platform_patch = if candidate.precision_mode {
-                Some(mtr_oudia_domain::build_platform_patch(source, &candidate.template, &station_slot_groups,
-                    &route.stops.iter().map(|stop| stop.platform_name.clone()).collect::<Vec<_>>())
-                    .map_err(|error| BusinessError::new(BusinessErrorKind::Validation, &error.to_string()))?)
-            } else { None };
+                Some(
+                    mtr_oudia_domain::build_platform_patch(
+                        source,
+                        &candidate.template,
+                        &station_slot_groups,
+                        &route
+                            .stops
+                            .iter()
+                            .map(|stop| stop.platform_name.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                    .map_err(|error| {
+                        BusinessError::new(BusinessErrorKind::Validation, &error.to_string())
+                    })?,
+                )
+            } else {
+                None
+            };
             let operation_present = source
                 .document
                 .properties
@@ -1029,9 +1060,21 @@ impl<
                     policy,
                     outbound_setting.as_ref().map(|setting| setting.runtime),
                     first_station_dwell,
-                ).map_err(|error| BusinessError::new(BusinessErrorKind::Validation, &error.to_string()))?;
-                OudiaPatch::new(time_patch.replacements().iter().chain(platform_patch.replacements()).cloned().collect())
-                    .map_err(|error| BusinessError::new(BusinessErrorKind::SaveVerification, &error.to_string()))?;
+                )
+                .map_err(|error| {
+                    BusinessError::new(BusinessErrorKind::Validation, &error.to_string())
+                })?;
+                OudiaPatch::new(
+                    time_patch
+                        .replacements()
+                        .iter()
+                        .chain(platform_patch.replacements())
+                        .cloned()
+                        .collect(),
+                )
+                .map_err(|error| {
+                    BusinessError::new(BusinessErrorKind::SaveVerification, &error.to_string())
+                })?;
             }
             s.previews.insert(
                 pid,
@@ -1127,9 +1170,20 @@ impl<
             }
         })?;
         let patch = if let Some(platform_patch) = &preview.platform_patch {
-            OudiaPatch::new(patch.replacements().iter().chain(platform_patch.replacements()).cloned().collect())
-                .map_err(|error| BusinessError::new(BusinessErrorKind::SaveVerification, &error.to_string()))?
-        } else { patch };
+            OudiaPatch::new(
+                patch
+                    .replacements()
+                    .iter()
+                    .chain(platform_patch.replacements())
+                    .cloned()
+                    .collect(),
+            )
+            .map_err(|error| {
+                BusinessError::new(BusinessErrorKind::SaveVerification, &error.to_string())
+            })?
+        } else {
+            patch
+        };
         self.saver.save(&input, output, hash, &patch)
     }
 }
@@ -1356,7 +1410,10 @@ fn preview_dto(
         precision_mode: false,
         outbound: None,
         id,
-        fixed_base_time: timetable.stops[0].rounded_departure_display.clone().unwrap_or_default(),
+        fixed_base_time: timetable.stops[0]
+            .rounded_departure_display
+            .clone()
+            .unwrap_or_default(),
         stops: timetable
             .stops
             .iter()

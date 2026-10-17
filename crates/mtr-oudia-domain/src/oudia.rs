@@ -300,7 +300,9 @@ pub fn parse_oudia(bytes: Vec<u8>) -> Result<OudiaSource, DomainError> {
                 }
                 "EkiTrack2" => {
                     if let Some(station) = current_station {
-                        document.station_slots[station].track_abbreviations.push(String::new());
+                        document.station_slots[station]
+                            .track_abbreviations
+                            .push(String::new());
                     }
                 }
                 _ => {}
@@ -354,9 +356,13 @@ pub fn parse_oudia(bytes: Vec<u8>) -> Result<OudiaSource, DomainError> {
                 document.station_slots[station].name_range = property.value_range;
             }
             if property.key == "TrackRyakusyou"
-                && sections.last().is_some_and(|section| section.name == "EkiTrack2")
+                && sections
+                    .last()
+                    .is_some_and(|section| section.name == "EkiTrack2")
                 && let Some(station) = current_station
-                && let Some(track) = document.station_slots[station].track_abbreviations.last_mut()
+                && let Some(track) = document.station_slots[station]
+                    .track_abbreviations
+                    .last_mut()
             {
                 *track = property.value.clone();
             }

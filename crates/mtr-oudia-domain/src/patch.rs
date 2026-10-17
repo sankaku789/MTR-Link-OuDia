@@ -166,7 +166,11 @@ pub fn build_platform_patch(
         return Err(EkiJikokuPatchError::TargetNotFound);
     }
     if station_slot_groups.len() != platforms.len()
-        || station_slot_groups.iter().flatten().copied().collect::<Vec<_>>()
+        || station_slot_groups
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>()
             != template.active_station_slots
     {
         return Err(EkiJikokuPatchError::CellStructureMismatch);
@@ -174,9 +178,15 @@ pub fn build_platform_patch(
     let mut replacements = Vec::new();
     for (slots, platform) in station_slot_groups.iter().zip(platforms) {
         for &slot in slots {
-            let station = source.document.station_slots.get(slot)
+            let station = source
+                .document
+                .station_slots
+                .get(slot)
                 .ok_or(EkiJikokuPatchError::TargetNotFound)?;
-            let matches = station.track_abbreviations.iter().enumerate()
+            let matches = station
+                .track_abbreviations
+                .iter()
+                .enumerate()
                 .filter(|(_, abbreviation)| !platform.is_empty() && *abbreviation == platform)
                 .map(|(index, _)| index)
                 .collect::<Vec<_>>();
@@ -187,14 +197,18 @@ pub fn build_platform_patch(
                 crate::OudiaDirection::Kudari => slot,
                 crate::OudiaDirection::Nobori => source.document.station_slots.len() - 1 - slot,
             };
-            let cell = train.eki_jikoku.cells.get(cell_index)
+            let cell = train
+                .eki_jikoku
+                .cells
+                .get(cell_index)
                 .ok_or(EkiJikokuPatchError::TargetNotFound)?;
             let raw = &source.bytes[cell.source_range.start()..cell.source_range.end()];
-            let (start, replacement) = if let Some(dollar) = raw.iter().position(|byte| *byte == b'$') {
-                (cell.source_range.start() + dollar + 1, track.to_string())
-            } else {
-                (cell.source_range.end(), format!("${track}"))
-            };
+            let (start, replacement) =
+                if let Some(dollar) = raw.iter().position(|byte| *byte == b'$') {
+                    (cell.source_range.start() + dollar + 1, track.to_string())
+                } else {
+                    (cell.source_range.end(), format!("${track}"))
+                };
             let range = SourceRange::new(start, cell.source_range.end())
                 .map_err(|_| EkiJikokuPatchError::CellStructureMismatch)?;
             replacements.push(ByteReplacement {
