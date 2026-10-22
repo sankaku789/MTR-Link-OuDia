@@ -19,10 +19,10 @@ export type Candidate = {
 };
 export type Preview = {
   outbound: { outbound_time: string; first_departure: string; duration_label: string } | null;
-  id: string; fixed_base_time: string; warnings: string[]; crosses_midnight: boolean;
+  id: string; precision_mode: boolean; fixed_base_time: string; warnings: string[]; crosses_midnight: boolean;
   operation_present: boolean; policy_choices: string[];
   stops: {
-    station: string; existing_arrival?: string; existing_departure?: string;
+    station: string; updated_platform?: string | null; existing_arrival?: string; existing_departure?: string;
     raw_arrival_millis?: number; raw_departure_millis?: number;
     rounded_arrival?: string; rounded_departure?: string;
     run_millis?: number; dwell_millis: number;
