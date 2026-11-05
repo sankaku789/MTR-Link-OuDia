@@ -50,12 +50,18 @@ fn excludes_return_trip_and_preserves_milliseconds_without_dwell() {
 }
 
 #[test]
-fn refuses_zero_or_multiple_initial_trips_without_choosing_nearest() {
+fn uses_earliest_initial_trip_but_refuses_same_time_duplicates() {
     assert!(measure(vec![]).is_err());
-    let mut second = arrival();
-    second.arrival += 60_000;
-    second.departure += 60_000;
-    assert!(measure(vec![arrival(), second]).is_err());
+
+    let mut later = arrival();
+    later.arrival += 60_000;
+    later.departure += 60_000;
+    // 指定した車庫発以降で最初に始発駅へ着く候補を採用する。入力順には依存しない。
+    assert_eq!(measure(vec![later, arrival()]).unwrap(), 43_597);
+
+    let mut same_time = arrival();
+    same_time.departure += 1_000;
+    assert!(measure(vec![arrival(), same_time]).is_err());
 }
 
 #[test]

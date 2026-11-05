@@ -122,7 +122,7 @@
               <label>Minecraft端末のUTCオフセット（このPCから自動入力） <input bind:value={utcOffset} placeholder="例: +09:00" aria-label="Minecraft端末のUTCオフセット" disabled={busy !== ''} /></label>
             </div>
             <p class="muted">通常は変更不要です。Minecraft端末やJavaの時間帯がこのPCと異なる場合だけ変更してください。夏時間にも注意してください。</p>
-            <p class="muted">OBAの運行ブロック先頭・始発ホームの予定着を使い、折返し便を除外します。基地由来は自動確認できないため、対象の試験出庫と対応することを確認してください。候補が0件または複数なら保存しません。</p>
+            <p class="muted">OBAの運行ブロック先頭・始発ホームの予定着を使い、折返し便を除外します。指定した車庫発以降で最初に始発駅へ着く候補を採用します。同じ時刻の候補が複数ある場合だけ保存しません。基地由来は自動確認できないため、対象の試験出庫と対応することを確認してください。</p>
           {:else if outboundMode === 'manual'}
             <label>車庫発 → 始発駅着（秒・停車時間を除く） <input type="number" min="0" step="0.001" bind:value={manualSeconds} disabled={busy !== ''} /></label>
             <p class="muted">例：13.5秒。ミリ秒単位で保存します（それより細かい値は四捨五入）。OuDiaへは秒単位で丸めて書き込みます。</p>

@@ -37,7 +37,8 @@ pub struct ObaArrivalsDto {
     pub arrivals: Vec<ObaArrivalDto>,
 }
 
-/// 車庫発は端末の当日、時刻が過ぎていれば翌日。別日や折返しを採用しない。
+/// 車庫発は端末の当日、時刻が過ぎていれば翌日。指定時刻以降で最初の運行ブロック先頭を採用し、
+/// 同時刻の重複だけを拒否する。折返しは採用しない。
 pub fn measure_oba_arrivals(
     dimension: u32,
     route: &MtrRouteSnapshot,
@@ -105,7 +106,8 @@ pub fn measure_oba_arrivals(
     )
 }
 
-/// JSON/HTTPやOuDiaに依存しない測定。一意でない候補は選ばない。
+/// JSON/HTTPやOuDiaに依存しない測定。呼び出し側で指定時間以降に絞った候補から
+/// 最も早い到着を採用し、同じ時刻の候補が複数ある場合だけ拒否する。
 pub fn measure_arrivals(
     dimension: u32,
     route: &MtrRouteSnapshot,
@@ -123,16 +125,24 @@ pub fn measure_arrivals(
     let id = MtrId::from_hex(&route.route_id).map_err(|_| input_error("路線IDが不正です"))?;
     let station_id =
         MtrId::from_hex(&first.station_id).map_err(|_| input_error("始発駅IDが不正です"))?;
-    let mut candidates = response
+    let candidates = response
         .arrivals
         .iter()
-        .filter(|a| a.route_id == id && a.platform_name == first.platform_name);
+        .filter(|a| a.route_id == id && a.platform_name == first.platform_name)
+        .collect::<Vec<_>>();
     let candidate = candidates
-        .next()
+        .iter()
+        .min_by_key(|a| a.arrival)
+        .copied()
         .ok_or_else(|| input_error("対象路線・始発ホームの発車候補がありません"))?;
-    if candidates.next().is_some() {
+    if candidates
+        .iter()
+        .filter(|a| a.arrival == candidate.arrival)
+        .count()
+        > 1
+    {
         return Err(input_error(
-            "発車候補が複数あるため一意に測定できません。試験列車を1本にするか手動入力してください",
+            "同じ時刻の発車候補が複数あるため一意に測定できません。試験列車を1本にするか手動入力してください",
         ));
     }
     let clock = parse_clock(depot_clock)?;
