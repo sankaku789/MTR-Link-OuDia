@@ -145,17 +145,35 @@ fn wraps_midnight_and_supports_non_jst_timezone() {
 }
 
 #[test]
-fn rejects_zero_and_multiple_candidates_instead_of_picking_nearest() {
+fn uses_earliest_candidate_and_rejects_same_time_duplicates() {
     assert!(measure_arrivals(0, &route(), "12:00:00", "+09:00", &response(vec![])).is_err());
-    let mut second = arrival();
-    second.departure += 60_000;
+
+    let mut later = arrival();
+    later.arrival += 60_000;
+    later.departure += 60_000;
+    assert_eq!(
+        measure_arrivals(
+            0,
+            &route(),
+            "12:00:00",
+            "+09:00",
+            &response(vec![later, arrival()])
+        )
+        .unwrap()
+        .runtime
+        .millis(),
+        77_000
+    );
+
+    let mut same_time = arrival();
+    same_time.departure += 1_000;
     assert!(
         measure_arrivals(
             0,
             &route(),
             "12:00:00",
             "+09:00",
-            &response(vec![arrival(), second])
+            &response(vec![arrival(), same_time])
         )
         .is_err()
     );

@@ -73,6 +73,34 @@
   function detect() { return task('MTR API を自動検出中です。', async () => { const id = await ensureSession(); const [, endpoints] = await api.detect(id); if (!endpoints.length) throw new Error('MTR APIを検出できませんでした。手動 URL を入力してください。'); endpoint = endpoints[0].url; if (endpoints.length > 1) error = `接続先候補が ${endpoints.length} 件あります。手動 URL を確認してください。`; }); }
   function connect() { dimension = 0; return fetchSnapshot(); }
   function fetchSnapshot() { const baseUrl = endpoint.trim(); if (!baseUrl) { error = 'API URLを入力してください。'; return; } return task('MTR スナップショットを取得中です。', async () => { const id = await ensureSession(); snapshot = await api.snapshot(id, baseUrl, dimension); endpoint = baseUrl; resetFromSnapshot(); }); }
+  // API現在時刻は毎回変わるため比較から除外し、駅・路線データの変化だけを見る。
+  const snapshotDataKey = (value: Snapshot) => JSON.stringify({ routes: value.routes, dimensions: value.dimensions });
+  async function refreshSnapshot() {
+    const baseUrl = endpoint.trim(); if (!baseUrl) { error = 'API URLを入力してください。'; return; }
+    const current = ++generation; busy = 'MTR API のキャッシュを待って再取得中です（最大30秒）。'; error = '';
+    try {
+      const id = await ensureSession();
+      const previous = snapshot ? snapshotDataKey(snapshot) : undefined;
+      const startedAt = Date.now();
+      let value = await api.snapshot(id, baseUrl, dimension);
+      // MTR APIのstations-and-routesは30秒キャッシュされる。変更がなければ
+      // キャッシュ切れを跨ぐまで1秒間隔で取り直す（境界用に1秒の余裕）。
+      while (previous !== undefined && snapshotDataKey(value) === previous && Date.now() - startedAt < 31_000) {
+        if (current !== generation) return;
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        if (current !== generation) return;
+        value = await api.snapshot(id, baseUrl, dimension);
+      }
+      if (current !== generation) return;
+      const changed = previous === undefined || snapshotDataKey(value) !== previous;
+      snapshot = value; endpoint = baseUrl;
+      if (changed) resetFromSnapshot();
+    } catch (e) {
+      if (current === generation) error = e instanceof Error ? e.message : String(e);
+    } finally {
+      if (current === generation) busy = '';
+    }
+  }
   async function chooseOudia() { if (!requireDesktop()) return; const selected = await open({ multiple: false, filters: [{ name: 'OuDia', extensions: ['oud2'] }] }); if (typeof selected === 'string' && sessionId) { oudiaPath = selected; await task('OuDia ファイルを解析中です。', async () => { inspection = await api.inspect(sessionId!, oudiaPath); resetFromOudia(); }); } }
   function reloadOudia() { if (!sessionId || !oudiaPath) return; return task('同じ OuDia ファイルを再解析中です。', async () => { inspection = await api.inspect(sessionId!, oudiaPath); resetFromOudia(); }); }
   function findCandidates() { if (!sessionId || !route || !inspection) return; task('経路候補を検索中です。', async () => { candidates = await api.candidates(sessionId!, route!.id, diagramIndex, trainType, trainNumber); candidate = undefined; manualMode = false; manualSlots = []; preview = undefined; }); }
@@ -84,7 +112,7 @@
 <main class="page" id="wizard" aria-busy={busy !== ''}>
   <h1>MTR 基準時分を OuDia へ反映</h1>
   {#if busy}<p class="notice" role="status">{busy}</p>{/if}{#if error}<p class="notice error" role="alert">エラー: {error}</p>{/if}
-  <section class="step" aria-labelledby="step1"><h2 id="step1">1. MTR 接続</h2><div class="fields"><button onclick={detect} disabled={busy !== '' || !autoDetectionSupported} title={autoDetectionSupported ? 'MTR APIを自動検出します' : 'Linuxでは自動検知を利用できません'}>自動検出</button><label>API URL <input bind:value={endpoint} inputmode="url" placeholder="http://127.0.0.1/" /></label><button onclick={connect} disabled={busy !== '' || !endpoint.trim()}>接続</button></div>{#if !autoDetectionSupported}<p class="notice warning" role="status">Linuxでは自動検知に対応していません。API URLを手動入力して接続してください。</p>{/if}{#if snapshot}<p role="status">接続先: {endpoint} / 取得路線数: {snapshot.routes.length} / API 時刻: {snapshot.api_current_time_millis} ms</p>{:else}<p class="muted">API URLにはベースURLだけを入力してください。例: http://127.0.0.1/ または http://127.0.0.1:49182/。APIパスやサブドメインは不要です。自動検出を行わなくても接続できます。</p>{/if}</section>
+  <section class="step" aria-labelledby="step1"><h2 id="step1">1. MTR 接続</h2><div class="fields"><button onclick={detect} disabled={busy !== '' || !autoDetectionSupported} title={autoDetectionSupported ? 'MTR APIを自動検出します' : 'Linuxでは自動検知を利用できません'}>自動検出</button><label>API URL <input bind:value={endpoint} inputmode="url" placeholder="http://127.0.0.1/" /></label><button onclick={connect} disabled={busy !== '' || !endpoint.trim()}>接続</button><button onclick={refreshSnapshot} disabled={busy !== '' || !endpoint.trim()} title="MTR APIのキャッシュ切れを待って取り直します">強制再取得</button></div><p class="muted">MTR APIは駅・路線情報を最大30秒キャッシュします。Minecraft側で路線や駅を変更した直後に反映されない場合は「強制再取得」を使ってください。</p>{#if !autoDetectionSupported}<p class="notice warning" role="status">Linuxでは自動検知に対応していません。API URLを手動入力して接続してください。</p>{/if}{#if snapshot}<p role="status">接続先: {endpoint} / 取得路線数: {snapshot.routes.length} / API 時刻: {snapshot.api_current_time_millis} ms</p>{:else}<p class="muted">API URLにはベースURLだけを入力してください。例: http://127.0.0.1/ または http://127.0.0.1:49182/。APIパスやサブドメインは不要です。自動検出を行わなくても接続できます。</p>{/if}</section>
   <section class="step" aria-labelledby="step2"><h2 id="step2">2. dimension 選択</h2>{#if snapshot}{#if snapshot.dimensions.length > 1}<label>dimension <select bind:value={dimension} onchange={fetchSnapshot}>{#each snapshot.dimensions as item, index}<option value={index}>{dimText(item)}</option>{/each}</select></label>{:else}<p>dimension: {snapshot.dimensions.length === 1 ? dimText(snapshot.dimensions[0]) : '取得対象外'}（1 件は自動選択）</p>{/if}{:else}<p class="muted">接続後に選択できます。</p>{/if}</section>
   <section class="step" aria-labelledby="step3">
     <h2 id="step3">3. MTR 路線選択</h2>
@@ -122,7 +150,7 @@
               <label>Minecraft端末のUTCオフセット（このPCから自動入力） <input bind:value={utcOffset} placeholder="例: +09:00" aria-label="Minecraft端末のUTCオフセット" disabled={busy !== ''} /></label>
             </div>
             <p class="muted">通常は変更不要です。Minecraft端末やJavaの時間帯がこのPCと異なる場合だけ変更してください。夏時間にも注意してください。</p>
-            <p class="muted">OBAの運行ブロック先頭・始発ホームの予定着を使い、折返し便を除外します。基地由来は自動確認できないため、対象の試験出庫と対応することを確認してください。候補が0件または複数なら保存しません。</p>
+            <p class="muted">OBAの運行ブロック先頭・始発ホームの予定着を使い、折返し便を除外します。指定した車庫発以降で最初に始発駅へ着く候補を採用します。同じ時刻の候補が複数ある場合だけ保存しません。基地由来は自動確認できないため、対象の試験出庫と対応することを確認してください。</p>
           {:else if outboundMode === 'manual'}
             <label>車庫発 → 始発駅着（秒・停車時間を除く） <input type="number" min="0" step="0.001" bind:value={manualSeconds} disabled={busy !== ''} /></label>
             <p class="muted">例：13.5秒。ミリ秒単位で保存します（それより細かい値は四捨五入）。OuDiaへは秒単位で丸めて書き込みます。</p>
