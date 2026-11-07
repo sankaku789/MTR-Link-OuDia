@@ -1,0 +1,17 @@
+# 独立した workspace。ルートの cargo test / CI に影響させない。
+[workspace]
+
+[package]
+name = "gpui-poc"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gpui = "0.2.2"
+
+# Linux 検証用の回避策。xattr 0.2.3 は Linux でも libc::ENOATTR (macOS 専用) を参照して
+# コンパイルできないため、ENODATA に直したローカルコピーを使う。
+# Windows ビルドには影響しない。
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }
