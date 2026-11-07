@@ -33,3 +33,6 @@ cargo run
 ## 現状
 
 - Milestone 1: ウィンドウ + ラベル + クリックで状態更新するボタン
+- Milestone 2: 公式 `input.rs` をベースにテキスト入力を追加。入力中のキーストロークと
+  確定後の内容を画面に表示するので、IME の composition 挙動を実機で観察できる
+  （`unicode-segmentation` を使用）

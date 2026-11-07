@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 gpui = "0.2.2"
+unicode-segmentation = "1"
 
 # Linux 検証用の回避策。xattr 0.2.3 は Linux でも libc::ENOATTR (macOS 専用) を参照して
 # コンパイルできないため、ENODATA に直したローカルコピーを使う。
