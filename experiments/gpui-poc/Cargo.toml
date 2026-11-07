@@ -8,7 +8,9 @@ edition = "2024"
 publish = false
 
 [dependencies]
-gpui = "0.2.2"
+# 0.2.2 には Windows の IME 切り替え修正 (Zed PR #41259) が入っていないため、
+# 修正コミット以降の gpui を git で固定する。
+gpui = { git = "https://github.com/zed-industries/zed", rev = "2ead8c42fb6792095d7cb02f7b89e467421dc8a0" }
 unicode-segmentation = "1"
 
 # Linux 検証用の回避策。xattr 0.2.3 は Linux でも libc::ENOATTR (macOS 専用) を参照して
