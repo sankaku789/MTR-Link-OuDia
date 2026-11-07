@@ -13,6 +13,12 @@ publish = false
 gpui = { git = "https://github.com/zed-industries/zed", rev = "2ead8c42fb6792095d7cb02f7b89e467421dc8a0" }
 unicode-segmentation = "1"
 
+# async bridge 検証用。既存の application / infrastructure をそのまま呼ぶ。
+mtr-oudia-application = { path = "../../crates/mtr-oudia-application" }
+mtr-oudia-infrastructure = { path = "../../crates/mtr-oudia-infrastructure" }
+futures = "0.3"
+tokio = { version = "1", features = ["rt", "net", "time"] }
+
 # Linux 検証用の回避策。xattr 0.2.3 は Linux でも libc::ENOATTR (macOS 専用) を参照して
 # コンパイルできないため、ENODATA に直したローカルコピーを使う。
 # Windows ビルドには影響しない。
