@@ -63,3 +63,8 @@ cargo run --bin fetch_poc
 - Milestone 4: `src/bin/fetch_poc.rs` で既存 `ReqwestMtrApiClient::fetch_snapshot` を
   呼ぶ async bridge を追加。tokio ランタイムを専用スレッドで動かし、結果を
   oneshot で GPUI の executor に返して路線一覧を再描画する。
+- Milestone 5: Carbon Design System v11 ベースのトークン層（`src/carbon/tokens.rs`:
+  Gray 100 / Gray 10 テーマ・スペーシング・タイポグラフィ）と最小コンポーネント群
+  （`src/carbon/components.rs`: `Button` / `Tile` / `Tag` / `InlineNotification`）を
+  追加し、`src/bin/fetch_poc.rs` に適用（テーマ切替・接続設定パネル・ステータス通知・
+  路線一覧の刷新）。
