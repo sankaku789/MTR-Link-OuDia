@@ -142,6 +142,8 @@ pub fn carbon_tile(layer: TileLayer, theme: &CarbonTheme) -> Div {
     div()
         .flex()
         .flex_col()
+        .w_full()
+        .min_w_0()
         .rounded_none()
         .bg(bg)
         .border_1()
@@ -296,6 +298,7 @@ pub fn carbon_inline_notification(
 
     let mut content = div()
         .flex_1()
+        .min_w_0()
         .flex()
         .flex_col()
         .justify_center()
@@ -312,9 +315,11 @@ pub fn carbon_inline_notification(
                 .flex()
                 .flex_row()
                 .items_center()
+                .min_w_0()
                 .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
                 .child(
                     div()
+                        .flex_shrink_0()
                         .font_weight(FontWeight::BOLD)
                         .text_size(CarbonTypography::LABEL_01.font_size_px())
                         .line_height(CarbonTypography::LABEL_01.line_height_px())
@@ -323,6 +328,8 @@ pub fn carbon_inline_notification(
                 )
                 .child(
                     div()
+                        .flex_1()
+                        .min_w_0()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_size(CarbonTypography::HEADING_COMPACT_01.font_size_px())
                         .line_height(CarbonTypography::HEADING_COMPACT_01.line_height_px())
@@ -334,6 +341,8 @@ pub fn carbon_inline_notification(
     if !subtitle.is_empty() {
         content = content.child(
             div()
+                .w_full()
+                .min_w_0()
                 .text_size(CarbonTypography::BODY_COMPACT_01.font_size_px())
                 .line_height(CarbonTypography::BODY_COMPACT_01.line_height_px())
                 .text_color(style.subtitle_text)
@@ -344,6 +353,8 @@ pub fn carbon_inline_notification(
     div()
         .flex()
         .flex_row()
+        .w_full()
+        .min_w_0()
         .rounded_none()
         .bg(style.bg)
         .border_l_3()
