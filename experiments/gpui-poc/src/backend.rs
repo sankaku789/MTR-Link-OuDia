@@ -12,8 +12,8 @@ use futures::{
     stream::FuturesUnordered,
 };
 use mtr_oudia_application::{
-    BusinessError, ConversionService, ConversionSessionStore, EndpointDto, MtrEndpoint, SessionId,
-    SnapshotDto,
+    BusinessError, ConversionService, ConversionSessionStore, EndpointDto, InspectionDto,
+    MtrEndpoint, SessionId, SnapshotDto,
 };
 use mtr_oudia_infrastructure::{
     FileMinecraftLogProvider, FileOudiaRepository, JsonSettingsRepository, ReqwestMtrApiClient,
@@ -105,6 +105,11 @@ enum BackendCommand {
         endpoint: MtrEndpoint,
         dimension: u32,
         reply: oneshot::Sender<Result<SnapshotDto, BusinessError>>,
+    },
+    InspectOudia {
+        session_id: SessionId,
+        location: PathBuf,
+        reply: oneshot::Sender<Result<InspectionDto, BusinessError>>,
     },
 }
 
@@ -204,6 +209,19 @@ impl AppBackend {
         })
     }
 
+    /// 指定された OuDia (.oud2) ファイルを読み込み、解析結果を返す。
+    pub fn inspect_oudia(
+        &self,
+        session_id: SessionId,
+        location: PathBuf,
+    ) -> oneshot::Receiver<Result<InspectionDto, BusinessError>> {
+        self.dispatch(|reply| BackendCommand::InspectOudia {
+            session_id,
+            location,
+            reply,
+        })
+    }
+
     /// 待受ポート列挙による MTR 自動検出に対応している環境かどうかを返す。
     pub fn auto_detection_supported() -> bool {
         cfg!(target_os = "windows")
@@ -264,6 +282,19 @@ fn run_worker_loop(
                             let result = service
                                 .fetch_mtr_snapshot(&session_id, &endpoint, dimension)
                                 .await;
+                            let _ = reply.send(result);
+                        }
+                        .boxed_local(),
+                    );
+                }
+                BackendCommand::InspectOudia {
+                    session_id,
+                    location,
+                    reply,
+                } => {
+                    in_flight.push(
+                        async move {
+                            let result = service.inspect_oudia(&session_id, &location);
                             let _ = reply.send(result);
                         }
                         .boxed_local(),

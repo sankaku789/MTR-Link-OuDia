@@ -1,6 +1,8 @@
-//! Carbon Design System v11 ベースの 5 ステップ画面シェルと Step 1（MTR 接続）。
+//! Carbon Design System v11 ベースの 5 ステップ画面シェルと Step 1（MTR 接続）・Step 2（OuDia 選択）。
 //!
 //! バックエンド処理はすべて [`gpui_poc::backend::AppBackend`] 経由で実行する。
+
+use std::path::PathBuf;
 
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, Div, FontWeight, IntoElement, ParentElement,
@@ -12,7 +14,9 @@ use gpui_poc::carbon::{
     ButtonKind, CarbonSpacing, CarbonTheme, CarbonThemeKind, CarbonTypography, NotificationKind,
     TagKind, TileLayer, carbon_button, carbon_inline_notification, carbon_tag, carbon_tile,
 };
-use mtr_oudia_application::{BusinessError, EndpointDto, MtrEndpoint, SessionId, SnapshotDto};
+use mtr_oudia_application::{
+    BusinessError, EndpointDto, InspectionDto, MtrEndpoint, SessionId, SnapshotDto,
+};
 
 const TRANSPARENT: Rgba = Rgba {
     r: 0.0,
@@ -78,7 +82,7 @@ impl AppStep {
     }
 }
 
-/// Step 1 の処理状態と通知内容。
+/// Step 1・Step 2 の処理状態と通知内容。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppStatus {
     InitFailed {
@@ -110,11 +114,26 @@ pub enum AppStatus {
         title: String,
         detail: String,
     },
+    InspectingOudia {
+        path: String,
+    },
+    InspectSuccess {
+        file_type: String,
+        station_count: usize,
+        diagram_count: usize,
+    },
+    InspectError {
+        title: String,
+        detail: String,
+    },
 }
 
 impl AppStatus {
     pub fn is_busy(&self) -> bool {
-        matches!(self, Self::Detecting | Self::Fetching { .. })
+        matches!(
+            self,
+            Self::Detecting | Self::Fetching { .. } | Self::InspectingOudia { .. }
+        )
     }
 
     pub fn is_detecting(&self) -> bool {
@@ -123,6 +142,10 @@ impl AppStatus {
 
     pub fn is_fetching(&self) -> bool {
         matches!(self, Self::Fetching { .. })
+    }
+
+    pub fn is_inspecting(&self) -> bool {
+        matches!(self, Self::InspectingOudia { .. })
     }
 
     pub fn is_init_failed(&self) -> bool {
@@ -179,6 +202,23 @@ pub fn status_notification(status: &AppStatus) -> (NotificationKind, String, Str
         AppStatus::FetchError { title, detail } => {
             (NotificationKind::Error, title.clone(), detail.clone())
         }
+        AppStatus::InspectingOudia { path } => (
+            NotificationKind::Info,
+            "解析中".to_string(),
+            format!("{path} を読み込んでいます..."),
+        ),
+        AppStatus::InspectSuccess {
+            file_type,
+            station_count,
+            diagram_count,
+        } => (
+            NotificationKind::Success,
+            "解析完了".to_string(),
+            format!("{file_type}: {station_count} 駅 / {diagram_count} ダイヤを読み込みました"),
+        ),
+        AppStatus::InspectError { title, detail } => {
+            (NotificationKind::Error, title.clone(), detail.clone())
+        }
     }
 }
 
@@ -212,6 +252,22 @@ fn fetch_button_label(fetching: bool) -> &'static str {
     }
 }
 
+fn inspect_button_label(inspecting: bool) -> &'static str {
+    if inspecting {
+        "解析中..."
+    } else {
+        "OuDia ファイルを選択"
+    }
+}
+
+fn kijun_status_badge(kijun_status: &str) -> (&str, TagKind) {
+    match kijun_status {
+        "valid" => ("valid", TagKind::Green),
+        "missing" => ("missing", TagKind::WarmGray),
+        other => (other, TagKind::Red),
+    }
+}
+
 fn format_dimension_label(index: usize, value: &impl std::fmt::Display) -> String {
     let raw = value.to_string();
     let display = raw
@@ -229,6 +285,8 @@ struct MtrShellState {
     selected_endpoint: Option<String>,
     dimension: u32,
     snapshot: Option<SnapshotDto>,
+    oudia_path: Option<PathBuf>,
+    inspection: Option<InspectionDto>,
     status: AppStatus,
 }
 
@@ -248,6 +306,8 @@ impl MtrShellState {
             selected_endpoint: None,
             dimension: 0,
             snapshot: None,
+            oudia_path: None,
+            inspection: None,
             status,
         }
     }
@@ -255,10 +315,8 @@ impl MtrShellState {
     fn is_step_completed(&self, step: AppStep) -> bool {
         match step {
             AppStep::Step1Mtr => self.snapshot.is_some(),
-            AppStep::Step2Oudia
-            | AppStep::Step3RouteMatch
-            | AppStep::Step4Preview
-            | AppStep::Step5Save => false,
+            AppStep::Step2Oudia => self.inspection.is_some(),
+            AppStep::Step3RouteMatch | AppStep::Step4Preview | AppStep::Step5Save => false,
         }
     }
 
@@ -340,6 +398,31 @@ impl MtrShellState {
             Err(err) => {
                 let (title, detail) = format_business_error(&err);
                 self.status = AppStatus::FetchError { title, detail };
+            }
+        }
+    }
+
+    fn apply_inspection_result(
+        &mut self,
+        path: PathBuf,
+        result: Result<InspectionDto, BusinessError>,
+    ) {
+        match result {
+            Ok(dto) => {
+                let file_type = dto.file_type.clone();
+                let station_count = dto.station_count;
+                let diagram_count = dto.diagrams.len();
+                self.oudia_path = Some(path);
+                self.inspection = Some(dto);
+                self.status = AppStatus::InspectSuccess {
+                    file_type,
+                    station_count,
+                    diagram_count,
+                };
+            }
+            Err(err) => {
+                let (title, detail) = format_business_error(&err);
+                self.status = AppStatus::InspectError { title, detail };
             }
         }
     }
@@ -473,6 +556,73 @@ impl MtrApp {
             self.state.dimension = dimension;
             cx.notify();
         }
+    }
+
+    fn start_select_oudia(&mut self, cx: &mut Context<Self>) {
+        if self.state.status.is_busy() || self.state.status.is_init_failed() {
+            return;
+        }
+
+        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("OuDia ファイルを選択".into()),
+        });
+
+        cx.spawn(async move |this, cx| {
+            let received = rx.await;
+            this.update(cx, |this, cx| match received {
+                Ok(Ok(Some(paths))) => {
+                    if let Some(path) = paths.into_iter().next() {
+                        this.start_inspect_oudia(path, cx);
+                    }
+                }
+                Ok(Ok(None)) | Err(_) => {}
+                Ok(Err(err)) => {
+                    this.state.status = AppStatus::InspectError {
+                        title: "ファイル選択ダイアログを開けませんでした".to_string(),
+                        detail: err.to_string(),
+                    };
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_inspect_oudia(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.state.status.is_busy() || self.state.status.is_init_failed() {
+            return;
+        }
+        let (Some(backend), Some(session_id)) = (&self.backend, self.session_id.clone()) else {
+            return;
+        };
+
+        self.state.status = AppStatus::InspectingOudia {
+            path: path.display().to_string(),
+        };
+        cx.notify();
+
+        let rx = backend.inspect_oudia(session_id, path.clone());
+        cx.spawn(async move |this, cx| {
+            let received = rx.await;
+            this.update(cx, |this, cx| {
+                match received {
+                    Ok(result) => this.state.apply_inspection_result(path, result),
+                    Err(_) => {
+                        this.state.status = AppStatus::InspectError {
+                            title: "OuDia 解析が中断されました".to_string(),
+                            detail: "バックグラウンド処理との通信が終了しました。".to_string(),
+                        };
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> Div {
@@ -912,6 +1062,290 @@ impl MtrApp {
             .child(routes_tile)
     }
 
+    fn render_step2(&self, cx: &mut Context<Self>) -> Div {
+        let theme = &self.state.theme;
+        let c = &theme.colors;
+        let busy = self.state.status.is_busy();
+        let disabled = busy || self.state.status.is_init_failed();
+        let inspecting = self.state.status.is_inspecting();
+
+        let path_display = self
+            .state
+            .oudia_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "未選択（「OuDia ファイルを選択」を押してください）".to_string());
+        let (file_tag_label, file_tag_kind) = if self.state.inspection.is_some() {
+            ("解析済み", TagKind::Green)
+        } else {
+            ("未選択", TagKind::CoolGray)
+        };
+
+        let file_tile = carbon_tile(TileLayer::Layer01, theme)
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_size(CarbonTypography::HEADING_02.font_size_px())
+                                            .line_height(
+                                                CarbonTypography::HEADING_02.line_height_px(),
+                                            )
+                                            .text_color(c.text_primary)
+                                            .child("OuDia ファイル"),
+                                    )
+                                    .child(carbon_tag(file_tag_label, file_tag_kind, theme)),
+                            )
+                            .child(info_row("選択ファイル:", path_display, theme)),
+                    )
+                    .child(carbon_button(
+                        "select-oudia-file",
+                        inspect_button_label(inspecting),
+                        ButtonKind::Primary,
+                        disabled,
+                        theme,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.start_select_oudia(cx);
+                        }),
+                    )),
+            );
+
+        let (notif_kind, notif_title, notif_subtitle) = status_notification(&self.state.status);
+        let notification =
+            carbon_inline_notification(notif_kind, notif_title, notif_subtitle, theme);
+
+        let inspection_content = if let Some(inspection) = &self.state.inspection {
+            let line_name = inspection
+                .line_name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .unwrap_or("記載なし")
+                .to_string();
+            let (kijun_label, kijun_kind) = kijun_status_badge(&inspection.kijun_status);
+
+            let diagram_list = if inspection.diagrams.is_empty() {
+                div()
+                    .text_size(CarbonTypography::BODY_01.font_size_px())
+                    .line_height(CarbonTypography::BODY_01.line_height_px())
+                    .text_color(c.text_secondary)
+                    .child("ダイヤが見つかりませんでした")
+                    .into_any_element()
+            } else {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                    .children(inspection.diagrams.iter().map(|diagram| {
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .min_w_0()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
+                            .px(CarbonSpacing::px(CarbonSpacing::SP_04))
+                            .py(CarbonSpacing::px(CarbonSpacing::SP_03))
+                            .bg(c.layer_02)
+                            .border_1()
+                            .border_color(c.border_subtle)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(CarbonTypography::BODY_01.font_size_px())
+                                    .line_height(CarbonTypography::BODY_01.line_height_px())
+                                    .text_color(c.text_primary)
+                                    .child(format!("ダイヤ #{}", diagram.index)),
+                            )
+                            .child(carbon_tag(
+                                format!("{} 列車", diagram.train_count),
+                                TagKind::Blue,
+                                theme,
+                            ))
+                    }))
+                    .into_any_element()
+            };
+
+            let train_type_list = if inspection.train_type_names.is_empty() {
+                div()
+                    .text_size(CarbonTypography::BODY_01.font_size_px())
+                    .line_height(CarbonTypography::BODY_01.line_height_px())
+                    .text_color(c.text_secondary)
+                    .child("列車種別はありません")
+                    .into_any_element()
+            } else {
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                    .children(inspection.train_type_names.iter().enumerate().map(
+                        |(index, name)| {
+                            let label = if name.is_empty() {
+                                format!("種別 {index}")
+                            } else {
+                                name.clone()
+                            };
+                            carbon_tag(label, TagKind::WarmGray, theme)
+                        },
+                    ))
+                    .into_any_element()
+            };
+
+            div()
+                .id("step2-inspection-body")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                        .child(carbon_tag(
+                            format!("形式: {}", inspection.file_type),
+                            TagKind::Blue,
+                            theme,
+                        ))
+                        .child(carbon_tag(
+                            format!("{} 駅", inspection.station_count),
+                            TagKind::CoolGray,
+                            theme,
+                        ))
+                        .child(carbon_tag(
+                            format!("基準ダイヤ: {kijun_label}"),
+                            kijun_kind,
+                            theme,
+                        )),
+                )
+                .child(info_row("路線名:", line_name, theme))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_size(CarbonTypography::LABEL_01.font_size_px())
+                                        .line_height(CarbonTypography::LABEL_01.line_height_px())
+                                        .text_color(c.text_secondary)
+                                        .child("ダイヤ一覧"),
+                                )
+                                .child(carbon_tag(
+                                    format!("{} ダイヤ", inspection.diagrams.len()),
+                                    TagKind::CoolGray,
+                                    theme,
+                                )),
+                        )
+                        .child(diagram_list),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_size(CarbonTypography::LABEL_01.font_size_px())
+                                        .line_height(CarbonTypography::LABEL_01.line_height_px())
+                                        .text_color(c.text_secondary)
+                                        .child("列車種別一覧"),
+                                )
+                                .child(carbon_tag(
+                                    format!("{} 種別", inspection.train_type_names.len()),
+                                    TagKind::CoolGray,
+                                    theme,
+                                )),
+                        )
+                        .child(train_type_list),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .py(CarbonSpacing::px(CarbonSpacing::SP_04))
+                .text_size(CarbonTypography::BODY_01.font_size_px())
+                .line_height(CarbonTypography::BODY_01.line_height_px())
+                .text_color(c.text_secondary)
+                .child(if inspecting {
+                    "OuDia ファイルを解析しています..."
+                } else {
+                    "OuDia ファイルを選択すると解析結果が表示されます"
+                })
+                .into_any_element()
+        };
+
+        let inspection_tile = carbon_tile(TileLayer::Layer01, theme)
+            .flex_1()
+            .min_h_0()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(CarbonTypography::HEADING_02.font_size_px())
+                            .line_height(CarbonTypography::HEADING_02.line_height_px())
+                            .text_color(c.text_primary)
+                            .child("解析結果"),
+                    ),
+            )
+            .child(inspection_content);
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
+            .child(file_tile)
+            .child(notification)
+            .child(inspection_tile)
+    }
+
     fn render_placeholder_step(&self, step: AppStep) -> Div {
         let theme = &self.state.theme;
         let c = &theme.colors;
@@ -978,10 +1412,10 @@ impl MtrApp {
 
         let body = match step {
             AppStep::Step1Mtr => self.render_step1(cx),
-            AppStep::Step2Oudia
-            | AppStep::Step3RouteMatch
-            | AppStep::Step4Preview
-            | AppStep::Step5Save => self.render_placeholder_step(step),
+            AppStep::Step2Oudia => self.render_step2(cx),
+            AppStep::Step3RouteMatch | AppStep::Step4Preview | AppStep::Step5Save => {
+                self.render_placeholder_step(step)
+            }
         };
 
         div()
@@ -1068,7 +1502,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mtr_oudia_application::{BusinessErrorKind, RouteDto};
+    use mtr_oudia_application::{BusinessErrorKind, DiagramDto, RouteDto};
 
     fn dummy_snapshot(routes: Vec<(&str, usize)>) -> SnapshotDto {
         SnapshotDto {
@@ -1086,6 +1520,32 @@ mod tests {
                 .collect(),
             dimensions: Vec::new(),
             api_current_time_millis: 1_000,
+        }
+    }
+
+    fn dummy_inspection(
+        file_type: &str,
+        line_name: Option<&str>,
+        station_count: usize,
+    ) -> InspectionDto {
+        InspectionDto {
+            file_type: file_type.to_string(),
+            line_name: line_name.map(str::to_string),
+            station_count,
+            kijun_status: "valid".to_string(),
+            diagrams: vec![
+                DiagramDto {
+                    index: 0,
+                    train_count: 12,
+                },
+                DiagramDto {
+                    index: 1,
+                    train_count: 8,
+                },
+            ],
+            train_types: vec![0, 1],
+            train_type_names: vec!["普通".to_string(), "急行".to_string()],
+            templates: Vec::new(),
         }
     }
 
@@ -1115,7 +1575,7 @@ mod tests {
         ];
         assert!(state.select_endpoint("http://127.0.0.1:49182/".to_string()));
         state.dimension = 2;
-        state.apply_snapshot_result(0, Ok(dummy_snapshot(vec![("山手線", 30)])));
+        state.apply_snapshot_result(2, Ok(dummy_snapshot(vec![("山手線", 30)])));
         assert!(state.snapshot.is_some());
         assert!(state.is_step_completed(AppStep::Step1Mtr));
 
@@ -1257,5 +1717,129 @@ mod tests {
     fn format_dimension_label_handles_string_and_number_values() {
         assert_eq!(format_dimension_label(0, &"\"overworld\""), "0: overworld");
         assert_eq!(format_dimension_label(1, &1), "1: 1");
+    }
+
+    #[test]
+    fn apply_inspection_result_updates_state_and_preserves_consistency_on_error() {
+        let mut state = MtrShellState::new(Ok(()));
+        assert!(state.oudia_path.is_none());
+        assert!(state.inspection.is_none());
+        assert!(!state.is_step_completed(AppStep::Step2Oudia));
+
+        // 初期状態での失敗時は oudia_path / inspection ともに未設定のまま。
+        state.apply_inspection_result(
+            PathBuf::from("/tmp/broken.oud2"),
+            Err(BusinessError {
+                kind: BusinessErrorKind::Io,
+                message: "OuDia ファイルを開けません".to_string(),
+                detail: Some("No such file".to_string()),
+            }),
+        );
+        assert!(state.oudia_path.is_none());
+        assert!(state.inspection.is_none());
+        assert!(!state.is_step_completed(AppStep::Step2Oudia));
+        assert_eq!(
+            state.status,
+            AppStatus::InspectError {
+                title: "OuDia ファイルを開けません".to_string(),
+                detail: "No such file".to_string(),
+            }
+        );
+
+        // 成功時に oudia_path・inspection が確定し、Step2Oudia が完了になる。
+        let first_path = PathBuf::from("/tmp/yamanote.oud2");
+        state.apply_inspection_result(
+            first_path.clone(),
+            Ok(dummy_inspection("OuDiaSecond.1.04", Some("山手線"), 30)),
+        );
+        assert_eq!(state.oudia_path.as_ref(), Some(&first_path));
+        assert_eq!(
+            state
+                .inspection
+                .as_ref()
+                .and_then(|dto| dto.line_name.as_deref()),
+            Some("山手線")
+        );
+        assert!(state.is_step_completed(AppStep::Step2Oudia));
+        assert_eq!(
+            state.status,
+            AppStatus::InspectSuccess {
+                file_type: "OuDiaSecond.1.04".to_string(),
+                station_count: 30,
+                diagram_count: 2,
+            }
+        );
+
+        // 別ファイルでの失敗時はエラー状態になりつつ、既存の oudia_path / inspection と矛盾しない。
+        state.apply_inspection_result(
+            PathBuf::from("/tmp/invalid.oud2"),
+            Err(BusinessError {
+                kind: BusinessErrorKind::ParseUnsupported,
+                message: "OuDia ファイルの解析に失敗しました".to_string(),
+                detail: None,
+            }),
+        );
+        assert_eq!(state.oudia_path.as_ref(), Some(&first_path));
+        assert_eq!(
+            state
+                .inspection
+                .as_ref()
+                .and_then(|dto| dto.line_name.as_deref()),
+            Some("山手線")
+        );
+        assert!(state.is_step_completed(AppStep::Step2Oudia));
+        assert_eq!(
+            state.status,
+            AppStatus::InspectError {
+                title: "OuDia ファイルの解析に失敗しました".to_string(),
+                detail: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn status_notification_maps_step2_statuses() {
+        let inspecting = AppStatus::InspectingOudia {
+            path: "/tmp/line.oud2".to_string(),
+        };
+        assert!(inspecting.is_busy());
+        assert!(inspecting.is_inspecting());
+        assert_eq!(
+            status_notification(&inspecting),
+            (
+                NotificationKind::Info,
+                "解析中".to_string(),
+                "/tmp/line.oud2 を読み込んでいます...".to_string(),
+            )
+        );
+
+        let success = AppStatus::InspectSuccess {
+            file_type: "OuDiaSecond.1.04".to_string(),
+            station_count: 24,
+            diagram_count: 2,
+        };
+        assert!(!success.is_busy());
+        assert_eq!(
+            status_notification(&success),
+            (
+                NotificationKind::Success,
+                "解析完了".to_string(),
+                "OuDiaSecond.1.04: 24 駅 / 2 ダイヤを読み込みました".to_string(),
+            )
+        );
+
+        let err = AppStatus::InspectError {
+            title: "OuDia ファイルの解析に失敗しました".to_string(),
+            detail: "Rosenmei が見つかりません".to_string(),
+        };
+        assert!(!err.is_busy());
+        assert_eq!(
+            status_notification(&err),
+            (
+                NotificationKind::Error,
+                "OuDia ファイルの解析に失敗しました".to_string(),
+                "Rosenmei が見つかりません".to_string(),
+            )
+        );
     }
 }
