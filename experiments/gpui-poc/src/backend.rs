@@ -13,8 +13,8 @@ use futures::{
 };
 use mtr_oudia_application::{
     BusinessError, CandidateId, ConversionService, ConversionSessionStore, EndpointDto,
-    InspectionDto, ManualMappingInput, MtrEndpoint, PreviewDto, RouteCandidateDto, SessionId,
-    SnapshotDto,
+    InspectionDto, ManualMappingInput, MtrEndpoint, PreviewDto, PreviewId, RouteCandidateDto,
+    SaveReceipt, SessionId, SnapshotDto,
 };
 use mtr_oudia_infrastructure::{
     FileMinecraftLogProvider, FileOudiaRepository, JsonSettingsRepository, ReqwestMtrApiClient,
@@ -125,6 +125,12 @@ enum BackendCommand {
         candidate_id: CandidateId,
         manual: Option<ManualMappingInput>,
         reply: oneshot::Sender<Result<PreviewDto, BusinessError>>,
+    },
+    SavePreview {
+        session_id: SessionId,
+        preview_id: PreviewId,
+        output: PathBuf,
+        reply: oneshot::Sender<Result<SaveReceipt, BusinessError>>,
     },
 }
 
@@ -271,6 +277,21 @@ impl AppBackend {
         })
     }
 
+    /// 生成済みプレビューを指定パスへ検証付きで保存する。
+    pub fn save_preview(
+        &self,
+        session_id: SessionId,
+        preview_id: PreviewId,
+        output: PathBuf,
+    ) -> oneshot::Receiver<Result<SaveReceipt, BusinessError>> {
+        self.dispatch(|reply| BackendCommand::SavePreview {
+            session_id,
+            preview_id,
+            output,
+            reply,
+        })
+    }
+
     /// 待受ポート列挙による MTR 自動検出に対応している環境かどうかを返す。
     pub fn auto_detection_supported() -> bool {
         cfg!(target_os = "windows")
@@ -381,6 +402,26 @@ fn run_worker_loop(
                         async move {
                             let result =
                                 service.build_preview(&session_id, Some(&candidate_id), manual);
+                            let _ = reply.send(result);
+                        }
+                        .boxed_local(),
+                    );
+                }
+                BackendCommand::SavePreview {
+                    session_id,
+                    preview_id,
+                    output,
+                    reply,
+                } => {
+                    in_flight.push(
+                        async move {
+                            // `build_preview` と同じくデフォルトの `OperationPolicy::Preserve` で保存する。
+                            let result = service.save_conversion(
+                                &session_id,
+                                &preview_id,
+                                &output,
+                                Default::default(),
+                            );
                             let _ = reply.send(result);
                         }
                         .boxed_local(),

@@ -30,6 +30,13 @@ cargo run --bin fetch_poc
 - 画面の「自動検出」ボタンで Minecraft ログ（`MTR_OUDIA_MINECRAFT_LOG`・`%APPDATA%\.minecraft\logs\latest.log`・実行中 Minecraft の `--gameDir`）およびローカル待受ポートから MTR API を探索します。
 - `MTR_ENDPOINT` は初期接続先の手動上書き用です（未設定のまま「取得」を押した場合も自動検出を試みます）。
 
+Step 1〜5 統合プロトタイプ（Carbon Design System v11 シェル + `ConversionService` 接続）:
+
+```sh
+cd experiments/gpui-poc
+cargo run --bin mtr_app
+```
+
 ## 評価したいこと
 
 1. API の手触り（状態変更 → `cx.notify()` → 再描画）
@@ -71,3 +78,7 @@ cargo run --bin fetch_poc
   （`src/carbon/components.rs`: `Button` / `Tile` / `Tag` / `InlineNotification`）を
   追加し、`src/bin/fetch_poc.rs` に適用（テーマ切替・接続設定パネル・ステータス通知・
   路線一覧の刷新）。
+- Milestone 6: `ConversionService` 接続と Step 1〜5 統合プロトタイプ（`src/backend.rs` の
+  `AppBackend` ブリッジと、`src/bin/mtr_app.rs` の 5 ステップ画面シェル：
+  Step 1 MTR 接続・Step 2 OuDia 選択・Step 3 路線経路照合・Step 4 プレビュー生成・
+  Step 5 安全保存 `save_conversion`）。

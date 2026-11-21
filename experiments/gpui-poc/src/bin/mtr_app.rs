@@ -1,8 +1,8 @@
-//! Carbon Design System v11 ベースの 5 ステップ画面シェルと Step 1〜4 の実装。
+//! Carbon Design System v11 ベースの 5 ステップ画面シェルと Step 1〜5 の実装。
 //!
 //! バックエンド処理はすべて [`gpui_poc::backend::AppBackend`] 経由で実行する。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, Div, FontWeight, IntoElement, ParentElement,
@@ -15,8 +15,8 @@ use gpui_poc::carbon::{
     TagKind, TileLayer, carbon_button, carbon_inline_notification, carbon_tag, carbon_tile,
 };
 use mtr_oudia_application::{
-    BusinessError, CandidateId, EndpointDto, InspectionDto, MtrEndpoint, PreviewDto,
-    RouteCandidateDto, SessionId, SnapshotDto,
+    BusinessError, CandidateId, EndpointDto, InspectionDto, MtrEndpoint, PreviewDto, PreviewId,
+    RouteCandidateDto, SaveReceipt, SessionId, SnapshotDto,
 };
 
 const TRANSPARENT: Rgba = Rgba {
@@ -83,7 +83,7 @@ impl AppStep {
     }
 }
 
-/// Step 1〜4 の処理状態と通知内容。
+/// Step 1〜5 の処理状態と通知内容。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppStatus {
     InitFailed {
@@ -145,6 +145,17 @@ pub enum AppStatus {
         title: String,
         detail: String,
     },
+    Saving {
+        path: String,
+    },
+    SaveSuccess {
+        output_path: String,
+        bytes: u64,
+    },
+    SaveError {
+        title: String,
+        detail: String,
+    },
 }
 
 impl AppStatus {
@@ -156,6 +167,7 @@ impl AppStatus {
                 | Self::InspectingOudia { .. }
                 | Self::FindingCandidates
                 | Self::Previewing
+                | Self::Saving { .. }
         )
     }
 
@@ -177,6 +189,10 @@ impl AppStatus {
 
     pub fn is_previewing(&self) -> bool {
         matches!(self, Self::Previewing)
+    }
+
+    pub fn is_saving(&self) -> bool {
+        matches!(self, Self::Saving { .. })
     }
 
     pub fn is_init_failed(&self) -> bool {
@@ -311,6 +327,19 @@ pub fn status_notification(status: &AppStatus) -> (NotificationKind, String, Str
         AppStatus::PreviewError { title, detail } => {
             (NotificationKind::Error, title.clone(), detail.clone())
         }
+        AppStatus::Saving { path } => (
+            NotificationKind::Info,
+            "保存中".to_string(),
+            format!("{path} に検証付きで保存しています..."),
+        ),
+        AppStatus::SaveSuccess { output_path, bytes } => (
+            NotificationKind::Success,
+            "保存完了".to_string(),
+            format!("{output_path} に保存しました ({bytes} bytes)"),
+        ),
+        AppStatus::SaveError { title, detail } => {
+            (NotificationKind::Error, title.clone(), detail.clone())
+        }
     }
 }
 
@@ -366,6 +395,34 @@ fn preview_button_label(previewing: bool) -> &'static str {
     } else {
         "プレビュー生成"
     }
+}
+
+fn save_button_label(saving: bool) -> &'static str {
+    if saving {
+        "保存中..."
+    } else {
+        "保存先を選んで保存"
+    }
+}
+
+/// 元 OuDia パスから保存先ダイアログの初期ディレクトリと既定ファイル名を生成する。
+pub fn suggest_save_location(oudia_path: Option<&Path>) -> (PathBuf, Option<String>) {
+    let Some(path) = oudia_path else {
+        return (PathBuf::from("."), None);
+    };
+    let dir = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let suggested_name = path.file_stem().map(|stem| {
+        let stem = stem.to_string_lossy();
+        match path.extension() {
+            Some(ext) if !ext.is_empty() => format!("{stem}_converted.{}", ext.to_string_lossy()),
+            _ => format!("{stem}_converted"),
+        }
+    });
+    (dir, suggested_name)
 }
 
 fn format_arrival_departure(arrival: Option<&str>, departure: Option<&str>) -> String {
@@ -444,6 +501,7 @@ struct MtrShellState {
     route_candidates: Vec<RouteCandidateDto>,
     selected_candidate_id: Option<CandidateId>,
     preview: Option<PreviewDto>,
+    save_receipt: Option<SaveReceipt>,
     status: AppStatus,
 }
 
@@ -471,6 +529,7 @@ impl MtrShellState {
             route_candidates: Vec::new(),
             selected_candidate_id: None,
             preview: None,
+            save_receipt: None,
             status,
         }
     }
@@ -481,7 +540,7 @@ impl MtrShellState {
             AppStep::Step2Oudia => self.inspection.is_some(),
             AppStep::Step3RouteMatch => self.selected_candidate_id.is_some(),
             AppStep::Step4Preview => self.preview.is_some(),
-            AppStep::Step5Save => false,
+            AppStep::Step5Save => self.save_receipt.is_some(),
         }
     }
 
@@ -493,6 +552,7 @@ impl MtrShellState {
         self.route_candidates.clear();
         self.selected_candidate_id = None;
         self.preview = None;
+        self.save_receipt = None;
     }
 
     fn clear_step3_for_snapshot_change(&mut self) {
@@ -655,6 +715,7 @@ impl MtrShellState {
             if self.selected_candidate_id.as_ref() != Some(&candidate_id) {
                 self.selected_candidate_id = Some(candidate_id);
                 self.preview = None;
+                self.save_receipt = None;
             }
             true
         } else {
@@ -674,6 +735,7 @@ impl MtrShellState {
                 self.route_candidates = candidates;
                 self.selected_candidate_id = auto_selected_id;
                 self.preview = None;
+                self.save_receipt = None;
                 self.status = AppStatus::CandidatesFound {
                     count,
                     auto_selected,
@@ -692,6 +754,7 @@ impl MtrShellState {
                 let stop_count = dto.stops.len();
                 let warning_count = dto.warnings.len();
                 self.preview = Some(dto);
+                self.save_receipt = None;
                 self.status = AppStatus::PreviewSuccess {
                     stop_count,
                     warning_count,
@@ -700,6 +763,21 @@ impl MtrShellState {
             Err(err) => {
                 let (title, detail) = format_business_error(&err);
                 self.status = AppStatus::PreviewError { title, detail };
+            }
+        }
+    }
+
+    fn apply_save_result(&mut self, result: Result<SaveReceipt, BusinessError>) {
+        match result {
+            Ok(receipt) => {
+                let output_path = receipt.output_path.clone();
+                let bytes = receipt.bytes;
+                self.save_receipt = Some(receipt);
+                self.status = AppStatus::SaveSuccess { output_path, bytes };
+            }
+            Err(err) => {
+                let (title, detail) = format_business_error(&err);
+                self.status = AppStatus::SaveError { title, detail };
             }
         }
     }
@@ -972,6 +1050,78 @@ impl MtrApp {
                     Err(_) => {
                         this.state.status = AppStatus::PreviewError {
                             title: "プレビュー生成が中断されました".to_string(),
+                            detail: "バックグラウンド処理との通信が終了しました。".to_string(),
+                        };
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_select_save_path(&mut self, cx: &mut Context<Self>) {
+        if self.state.status.is_busy() || self.state.status.is_init_failed() {
+            return;
+        }
+        let Some(preview_id) = self.state.preview.as_ref().map(|p| p.id.clone()) else {
+            self.state.status = AppStatus::SaveError {
+                title: "プレビューが未生成です".to_string(),
+                detail: "Step 4 で時刻表プレビューを生成してから保存してください。".to_string(),
+            };
+            cx.notify();
+            return;
+        };
+
+        let (dir, suggested_name) = suggest_save_location(self.state.oudia_path.as_deref());
+        let rx = cx.prompt_for_new_path(&dir, suggested_name.as_deref());
+
+        cx.spawn(async move |this, cx| {
+            let received = rx.await;
+            this.update(cx, |this, cx| match received {
+                Ok(Ok(Some(path))) => {
+                    this.start_save(preview_id, path, cx);
+                }
+                Ok(Ok(None)) | Err(_) => {}
+                Ok(Err(err)) => {
+                    this.state.status = AppStatus::SaveError {
+                        title: "保存先選択ダイアログを開けませんでした".to_string(),
+                        detail: err.to_string(),
+                    };
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_save(&mut self, preview_id: PreviewId, output_path: PathBuf, cx: &mut Context<Self>) {
+        if self.state.status.is_busy() || self.state.status.is_init_failed() {
+            return;
+        }
+        if self.state.preview.as_ref().map(|p| &p.id) != Some(&preview_id) {
+            return;
+        }
+        let (Some(backend), Some(session_id)) = (&self.backend, self.session_id.clone()) else {
+            return;
+        };
+
+        self.state.status = AppStatus::Saving {
+            path: output_path.display().to_string(),
+        };
+        cx.notify();
+
+        let rx = backend.save_preview(session_id, preview_id, output_path);
+        cx.spawn(async move |this, cx| {
+            let received = rx.await;
+            this.update(cx, |this, cx| {
+                match received {
+                    Ok(result) => this.state.apply_save_result(result),
+                    Err(_) => {
+                        this.state.status = AppStatus::SaveError {
+                            title: "保存処理が中断されました".to_string(),
                             detail: "バックグラウンド処理との通信が終了しました。".to_string(),
                         };
                     }
@@ -2588,11 +2738,43 @@ impl MtrApp {
             .child(result_tile)
     }
 
-    fn render_placeholder_step(&self, step: AppStep) -> Div {
+    fn render_step5(&self, cx: &mut Context<Self>) -> Div {
         let theme = &self.state.theme;
         let c = &theme.colors;
+        let busy = self.state.status.is_busy();
+        let disabled = busy || self.state.status.is_init_failed();
+        let saving = self.state.status.is_saving();
 
-        carbon_tile(TileLayer::Layer01, theme)
+        let Some(preview) = &self.state.preview else {
+            return div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
+                .child(carbon_inline_notification(
+                    NotificationKind::Info,
+                    "Step 4（プレビュー）が未完了です",
+                    "Step 4 で時刻表プレビューを生成してから安全保存を実行してください。",
+                    theme,
+                ));
+        };
+
+        let (save_tag_label, save_tag_kind) = if self.state.save_receipt.is_some() {
+            ("保存済み", TagKind::Green)
+        } else {
+            ("未保存", TagKind::CoolGray)
+        };
+
+        let oudia_path_display = self
+            .state
+            .oudia_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "未選択".to_string());
+
+        let action_tile = carbon_tile(TileLayer::Layer01, theme)
             .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
             .child(
                 div()
@@ -2600,31 +2782,121 @@ impl MtrApp {
                     .flex_row()
                     .items_center()
                     .justify_between()
-                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
                     .child(
                         div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_size(CarbonTypography::HEADING_02.font_size_px())
-                            .line_height(CarbonTypography::HEADING_02.line_height_px())
-                            .text_color(c.text_primary)
-                            .child(format!("Step {}: {}", step.number(), step.label())),
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_size(CarbonTypography::HEADING_02.font_size_px())
+                                            .line_height(
+                                                CarbonTypography::HEADING_02.line_height_px(),
+                                            )
+                                            .text_color(c.text_primary)
+                                            .child("安全保存"),
+                                    )
+                                    .child(carbon_tag(save_tag_label, save_tag_kind, theme)),
+                            )
+                            .child(info_row("プレビュー ID:", preview.id.0.clone(), theme))
+                            .child(info_row("元 OuDia パス:", oudia_path_display, theme)),
                     )
-                    .child(carbon_tag(
-                        "今後のタスクで移植予定",
-                        TagKind::WarmGray,
+                    .child(carbon_button(
+                        "select-save-path",
+                        save_button_label(saving),
+                        ButtonKind::Primary,
+                        disabled,
                         theme,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.start_select_save_path(cx);
+                        }),
                     )),
-            )
-            .child(
-                div()
-                    .text_size(CarbonTypography::BODY_01.font_size_px())
-                    .line_height(CarbonTypography::BODY_01.line_height_px())
-                    .text_color(c.text_secondary)
-                    .child(format!(
-                        "{} 今後のタスクで移植予定です。",
-                        step.description()
-                    )),
-            )
+            );
+
+        let (notif_kind, notif_title, notif_subtitle) = status_notification(&self.state.status);
+        let notification =
+            carbon_inline_notification(notif_kind, notif_title, notif_subtitle, theme);
+
+        let result_tile = if let Some(receipt) = &self.state.save_receipt {
+            carbon_tile(TileLayer::Layer01, theme)
+                .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_size(CarbonTypography::HEADING_02.font_size_px())
+                                        .line_height(CarbonTypography::HEADING_02.line_height_px())
+                                        .text_color(c.text_primary)
+                                        .child("保存結果"),
+                                )
+                                .child(carbon_tag("検証済み", TagKind::Green, theme)),
+                        )
+                        .child(carbon_tag(
+                            format!("{} bytes", receipt.bytes),
+                            TagKind::Blue,
+                            theme,
+                        )),
+                )
+                .child(info_row("出力パス:", receipt.output_path.clone(), theme))
+                .child(info_row("SHA-256:", receipt.sha256.clone(), theme))
+        } else {
+            carbon_tile(TileLayer::Layer01, theme)
+                .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(CarbonTypography::HEADING_02.font_size_px())
+                        .line_height(CarbonTypography::HEADING_02.line_height_px())
+                        .text_color(c.text_primary)
+                        .child("保存結果"),
+                )
+                .child(
+                    div()
+                        .py(CarbonSpacing::px(CarbonSpacing::SP_04))
+                        .text_size(CarbonTypography::BODY_01.font_size_px())
+                        .line_height(CarbonTypography::BODY_01.line_height_px())
+                        .text_color(c.text_secondary)
+                        .child(if saving {
+                            "変換結果を検証付きで保存しています..."
+                        } else {
+                            "「保存先を選んで保存」を押すと検証付きで保存し、結果が表示されます"
+                        }),
+                )
+        };
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
+            .child(action_tile)
+            .child(notification)
+            .child(result_tile)
     }
 
     fn render_main(&self, cx: &mut Context<Self>) -> Div {
@@ -2657,7 +2929,7 @@ impl MtrApp {
             AppStep::Step2Oudia => self.render_step2(cx),
             AppStep::Step3RouteMatch => self.render_step3(cx),
             AppStep::Step4Preview => self.render_step4(cx),
-            AppStep::Step5Save => self.render_placeholder_step(step),
+            AppStep::Step5Save => self.render_step5(cx),
         };
 
         div()
@@ -3556,5 +3828,249 @@ mod tests {
         assert_eq!(format_dwell_seconds(30_000), "30 秒");
         assert_eq!(format_dwell_seconds(15_500), "15.5 秒");
         assert_eq!(format_dwell_seconds(12_340), "12.34 秒");
+    }
+
+    fn dummy_save_receipt(output_path: &str, bytes: u64, sha256: &str) -> SaveReceipt {
+        SaveReceipt {
+            output_path: output_path.to_string(),
+            bytes,
+            sha256: sha256.to_string(),
+        }
+    }
+
+    #[test]
+    fn apply_save_result_updates_state_and_preserves_consistency_on_error() {
+        let mut state = MtrShellState::new(Ok(()));
+        assert!(state.save_receipt.is_none());
+        assert!(!state.is_step_completed(AppStep::Step5Save));
+
+        // 初期状態での保存失敗時は save_receipt 未設定のままエラー状態になる。
+        state.apply_save_result(Err(BusinessError {
+            kind: BusinessErrorKind::SaveVerification,
+            message: "安全な保存計画を作成できません".to_string(),
+            detail: Some("hash mismatch".to_string()),
+        }));
+        assert!(state.save_receipt.is_none());
+        assert!(!state.is_step_completed(AppStep::Step5Save));
+        assert_eq!(
+            state.status,
+            AppStatus::SaveError {
+                title: "安全な保存計画を作成できません".to_string(),
+                detail: "hash mismatch".to_string(),
+            }
+        );
+
+        // 保存成功時は save_receipt が確定し、Step5Save が完了になる。
+        state.apply_save_result(Ok(dummy_save_receipt(
+            "/tmp/yamanote_converted.oud2",
+            4096,
+            "abcdef0123456789",
+        )));
+        assert_eq!(
+            state.save_receipt.as_ref().map(|r| r.output_path.as_str()),
+            Some("/tmp/yamanote_converted.oud2")
+        );
+        assert_eq!(state.save_receipt.as_ref().map(|r| r.bytes), Some(4096));
+        assert!(state.is_step_completed(AppStep::Step5Save));
+        assert_eq!(
+            state.status,
+            AppStatus::SaveSuccess {
+                output_path: "/tmp/yamanote_converted.oud2".to_string(),
+                bytes: 4096,
+            }
+        );
+
+        // 以降の保存失敗時はエラー状態になりつつ、既存の save_receipt と矛盾しない。
+        state.apply_save_result(Err(BusinessError {
+            kind: BusinessErrorKind::Io,
+            message: "保存先へ書き込めません".to_string(),
+            detail: None,
+        }));
+        assert_eq!(
+            state.save_receipt.as_ref().map(|r| r.output_path.as_str()),
+            Some("/tmp/yamanote_converted.oud2")
+        );
+        assert!(state.is_step_completed(AppStep::Step5Save));
+        assert_eq!(
+            state.status,
+            AppStatus::SaveError {
+                title: "保存先へ書き込めません".to_string(),
+                detail: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn upstream_updates_clear_downstream_step5_save_receipt() {
+        let mut state = MtrShellState::new(Ok(()));
+        state.candidates = vec![
+            "http://127.0.0.1:49182/".to_string(),
+            "http://127.0.0.1:49183/".to_string(),
+        ];
+        assert!(state.select_endpoint("http://127.0.0.1:49182/".to_string()));
+        state.apply_snapshot_result(0, Ok(dummy_snapshot(vec![("山手線", 30)])));
+        state.apply_inspection_result(
+            PathBuf::from("/tmp/yamanote.oud2"),
+            Ok(dummy_inspection("OuDiaSecond.1.04", Some("山手線"), 30)),
+        );
+        assert!(state.select_route("route-0".to_string()));
+        state.apply_candidates_result(Ok(vec![
+            dummy_candidate("cand-1", 0, 0, "PrimaryExact", true, 30),
+            dummy_candidate("cand-2", 0, 1, "Partial", false, 20),
+        ]));
+        state.apply_preview_result(Ok(dummy_preview("preview-1", 30, false, false, Vec::new())));
+        state.apply_save_result(Ok(dummy_save_receipt(
+            "/tmp/yamanote_converted.oud2",
+            2048,
+            "sha-1",
+        )));
+        assert!(state.save_receipt.is_some());
+        assert!(state.is_step_completed(AppStep::Step5Save));
+
+        // Step 4 プレビュー再生成で save_receipt がクリアされる。
+        state.apply_preview_result(Ok(dummy_preview("preview-2", 30, false, false, Vec::new())));
+        assert!(state.save_receipt.is_none());
+        assert!(!state.is_step_completed(AppStep::Step5Save));
+
+        // Step 3 別候補への変更で save_receipt がクリアされる。
+        state.apply_save_result(Ok(dummy_save_receipt(
+            "/tmp/yamanote_converted.oud2",
+            2048,
+            "sha-2",
+        )));
+        assert!(state.save_receipt.is_some());
+        assert!(state.select_candidate(CandidateId("cand-2".to_string())));
+        assert!(state.save_receipt.is_none());
+
+        // Step 3 候補再検索で save_receipt がクリアされる。
+        state.apply_preview_result(Ok(dummy_preview("preview-3", 20, false, false, Vec::new())));
+        state.apply_save_result(Ok(dummy_save_receipt(
+            "/tmp/yamanote_converted.oud2",
+            2048,
+            "sha-3",
+        )));
+        assert!(state.save_receipt.is_some());
+        state.apply_candidates_result(Ok(vec![dummy_candidate(
+            "cand-3",
+            0,
+            2,
+            "PrimaryExact",
+            true,
+            30,
+        )]));
+        assert!(state.save_receipt.is_none());
+
+        // Step 2 OuDia 更新で save_receipt がクリアされる。
+        state.apply_preview_result(Ok(dummy_preview("preview-4", 30, false, false, Vec::new())));
+        state.apply_save_result(Ok(dummy_save_receipt(
+            "/tmp/yamanote_converted.oud2",
+            2048,
+            "sha-4",
+        )));
+        assert!(state.save_receipt.is_some());
+        state.apply_inspection_result(
+            PathBuf::from("/tmp/chuo.oud2"),
+            Ok(dummy_inspection("OuDiaSecond.1.04", Some("中央線"), 24)),
+        );
+        assert!(state.save_receipt.is_none());
+
+        // Step 1 スナップショット変更で save_receipt がクリアされる。
+        assert!(state.select_route("route-0".to_string()));
+        state.apply_candidates_result(Ok(vec![dummy_candidate(
+            "cand-4",
+            0,
+            0,
+            "PrimaryExact",
+            true,
+            24,
+        )]));
+        state.apply_preview_result(Ok(dummy_preview("preview-5", 24, false, false, Vec::new())));
+        state.apply_save_result(Ok(dummy_save_receipt(
+            "/tmp/chuo_converted.oud2",
+            2048,
+            "sha-5",
+        )));
+        assert!(state.save_receipt.is_some());
+        state.apply_snapshot_result(1, Ok(dummy_snapshot(vec![("京浜東北線", 35)])));
+        assert!(state.save_receipt.is_none());
+    }
+
+    #[test]
+    fn suggest_save_location_generates_expected_directory_and_filename() {
+        assert_eq!(
+            suggest_save_location(Some(Path::new("/tmp/routes/sample.oud"))),
+            (
+                PathBuf::from("/tmp/routes"),
+                Some("sample_converted.oud".to_string()),
+            )
+        );
+        assert_eq!(
+            suggest_save_location(Some(Path::new("/tmp/routes/sample.oud2"))),
+            (
+                PathBuf::from("/tmp/routes"),
+                Some("sample_converted.oud2".to_string()),
+            )
+        );
+        assert_eq!(
+            suggest_save_location(Some(Path::new("/tmp/routes/sample"))),
+            (
+                PathBuf::from("/tmp/routes"),
+                Some("sample_converted".to_string()),
+            )
+        );
+        assert_eq!(
+            suggest_save_location(Some(Path::new("relative.oud2"))),
+            (
+                PathBuf::from("."),
+                Some("relative_converted.oud2".to_string()),
+            )
+        );
+        assert_eq!(suggest_save_location(None), (PathBuf::from("."), None));
+    }
+
+    #[test]
+    fn status_notification_maps_step5_statuses() {
+        let saving = AppStatus::Saving {
+            path: "/tmp/out.oud2".to_string(),
+        };
+        assert!(saving.is_busy());
+        assert!(saving.is_saving());
+        assert_eq!(
+            status_notification(&saving),
+            (
+                NotificationKind::Info,
+                "保存中".to_string(),
+                "/tmp/out.oud2 に検証付きで保存しています...".to_string(),
+            )
+        );
+
+        let success = AppStatus::SaveSuccess {
+            output_path: "/tmp/out.oud2".to_string(),
+            bytes: 1234,
+        };
+        assert!(!success.is_busy());
+        assert!(!success.is_saving());
+        assert_eq!(
+            status_notification(&success),
+            (
+                NotificationKind::Success,
+                "保存完了".to_string(),
+                "/tmp/out.oud2 に保存しました (1234 bytes)".to_string(),
+            )
+        );
+
+        let err = AppStatus::SaveError {
+            title: "安全な保存計画を作成できません".to_string(),
+            detail: "expected hash mismatch".to_string(),
+        };
+        assert!(!err.is_busy());
+        assert_eq!(
+            status_notification(&err),
+            (
+                NotificationKind::Error,
+                "安全な保存計画を作成できません".to_string(),
+                "expected hash mismatch".to_string(),
+            )
+        );
     }
 }
