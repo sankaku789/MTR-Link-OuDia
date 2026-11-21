@@ -1,4 +1,4 @@
-//! Carbon Design System v11 ベースの 5 ステップ画面シェルと Step 1〜3 の実装。
+//! Carbon Design System v11 ベースの 5 ステップ画面シェルと Step 1〜4 の実装。
 //!
 //! バックエンド処理はすべて [`gpui_poc::backend::AppBackend`] 経由で実行する。
 
@@ -15,8 +15,8 @@ use gpui_poc::carbon::{
     TagKind, TileLayer, carbon_button, carbon_inline_notification, carbon_tag, carbon_tile,
 };
 use mtr_oudia_application::{
-    BusinessError, CandidateId, EndpointDto, InspectionDto, MtrEndpoint, RouteCandidateDto,
-    SessionId, SnapshotDto,
+    BusinessError, CandidateId, EndpointDto, InspectionDto, MtrEndpoint, PreviewDto,
+    RouteCandidateDto, SessionId, SnapshotDto,
 };
 
 const TRANSPARENT: Rgba = Rgba {
@@ -83,7 +83,7 @@ impl AppStep {
     }
 }
 
-/// Step 1〜3 の処理状態と通知内容。
+/// Step 1〜4 の処理状態と通知内容。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppStatus {
     InitFailed {
@@ -136,6 +136,15 @@ pub enum AppStatus {
         title: String,
         detail: String,
     },
+    Previewing,
+    PreviewSuccess {
+        stop_count: usize,
+        warning_count: usize,
+    },
+    PreviewError {
+        title: String,
+        detail: String,
+    },
 }
 
 impl AppStatus {
@@ -146,6 +155,7 @@ impl AppStatus {
                 | Self::Fetching { .. }
                 | Self::InspectingOudia { .. }
                 | Self::FindingCandidates
+                | Self::Previewing
         )
     }
 
@@ -163,6 +173,10 @@ impl AppStatus {
 
     pub fn is_finding_candidates(&self) -> bool {
         matches!(self, Self::FindingCandidates)
+    }
+
+    pub fn is_previewing(&self) -> bool {
+        matches!(self, Self::Previewing)
     }
 
     pub fn is_init_failed(&self) -> bool {
@@ -269,6 +283,34 @@ pub fn status_notification(status: &AppStatus) -> (NotificationKind, String, Str
         AppStatus::CandidatesError { title, detail } => {
             (NotificationKind::Error, title.clone(), detail.clone())
         }
+        AppStatus::Previewing => (
+            NotificationKind::Info,
+            "プレビュー生成中".to_string(),
+            "選択された照合候補から時刻表プレビューを生成しています...".to_string(),
+        ),
+        AppStatus::PreviewSuccess {
+            stop_count,
+            warning_count,
+        } => {
+            if *warning_count > 0 {
+                (
+                    NotificationKind::Warning,
+                    "プレビュー生成完了（警告あり）".to_string(),
+                    format!(
+                        "{stop_count} 駅の時刻表を生成しましたが、{warning_count} 件の警告があります"
+                    ),
+                )
+            } else {
+                (
+                    NotificationKind::Success,
+                    "プレビュー生成完了".to_string(),
+                    format!("{stop_count} 駅の時刻表プレビューを生成しました"),
+                )
+            }
+        }
+        AppStatus::PreviewError { title, detail } => {
+            (NotificationKind::Error, title.clone(), detail.clone())
+        }
     }
 }
 
@@ -315,6 +357,37 @@ fn find_candidates_button_label(finding: bool) -> &'static str {
         "検索中..."
     } else {
         "候補を検索"
+    }
+}
+
+fn preview_button_label(previewing: bool) -> &'static str {
+    if previewing {
+        "生成中..."
+    } else {
+        "プレビュー生成"
+    }
+}
+
+fn format_arrival_departure(arrival: Option<&str>, departure: Option<&str>) -> String {
+    match (arrival, departure) {
+        (Some(arr), Some(dep)) => format!("{arr} / {dep}"),
+        (Some(arr), None) => format!("{arr} / -"),
+        (None, Some(dep)) => format!("- / {dep}"),
+        (None, None) => "-".to_string(),
+    }
+}
+
+fn format_dwell_seconds(dwell_millis: i64) -> String {
+    if dwell_millis % 1000 == 0 {
+        format!("{} 秒", dwell_millis / 1000)
+    } else {
+        let sign = if dwell_millis < 0 { "-" } else { "" };
+        let abs = dwell_millis.unsigned_abs();
+        let whole = abs / 1000;
+        let frac = abs % 1000;
+        let formatted = format!("{sign}{whole}.{frac:03}");
+        let trimmed = formatted.trim_end_matches('0').trim_end_matches('.');
+        format!("{trimmed} 秒")
     }
 }
 
@@ -370,6 +443,7 @@ struct MtrShellState {
     selected_train_type: Option<usize>,
     route_candidates: Vec<RouteCandidateDto>,
     selected_candidate_id: Option<CandidateId>,
+    preview: Option<PreviewDto>,
     status: AppStatus,
 }
 
@@ -396,6 +470,7 @@ impl MtrShellState {
             selected_train_type: None,
             route_candidates: Vec::new(),
             selected_candidate_id: None,
+            preview: None,
             status,
         }
     }
@@ -405,7 +480,8 @@ impl MtrShellState {
             AppStep::Step1Mtr => self.snapshot.is_some(),
             AppStep::Step2Oudia => self.inspection.is_some(),
             AppStep::Step3RouteMatch => self.selected_candidate_id.is_some(),
-            AppStep::Step4Preview | AppStep::Step5Save => false,
+            AppStep::Step4Preview => self.preview.is_some(),
+            AppStep::Step5Save => false,
         }
     }
 
@@ -416,6 +492,7 @@ impl MtrShellState {
     fn clear_candidate_selection(&mut self) {
         self.route_candidates.clear();
         self.selected_candidate_id = None;
+        self.preview = None;
     }
 
     fn clear_step3_for_snapshot_change(&mut self) {
@@ -469,16 +546,14 @@ impl MtrShellState {
                     let endpoint = urls[0].clone();
                     self.candidates = urls;
                     self.apply_selected_endpoint(endpoint.clone());
-                    self.route_candidates.clear();
-                    self.selected_candidate_id = None;
+                    self.clear_candidate_selection();
                     self.status = AppStatus::DetectedSingle { endpoint };
                 } else {
                     let selected = urls[0].clone();
                     let count = urls.len();
                     self.candidates = urls;
                     self.apply_selected_endpoint(selected.clone());
-                    self.route_candidates.clear();
-                    self.selected_candidate_id = None;
+                    self.clear_candidate_selection();
                     self.status = AppStatus::DetectedMultiple { count, selected };
                 }
             }
@@ -577,7 +652,10 @@ impl MtrShellState {
             return false;
         }
         if self.route_candidates.iter().any(|c| c.id == candidate_id) {
-            self.selected_candidate_id = Some(candidate_id);
+            if self.selected_candidate_id.as_ref() != Some(&candidate_id) {
+                self.selected_candidate_id = Some(candidate_id);
+                self.preview = None;
+            }
             true
         } else {
             false
@@ -595,6 +673,7 @@ impl MtrShellState {
                 let auto_selected = auto_selected_id.is_some();
                 self.route_candidates = candidates;
                 self.selected_candidate_id = auto_selected_id;
+                self.preview = None;
                 self.status = AppStatus::CandidatesFound {
                     count,
                     auto_selected,
@@ -603,6 +682,24 @@ impl MtrShellState {
             Err(err) => {
                 let (title, detail) = format_business_error(&err);
                 self.status = AppStatus::CandidatesError { title, detail };
+            }
+        }
+    }
+
+    fn apply_preview_result(&mut self, result: Result<PreviewDto, BusinessError>) {
+        match result {
+            Ok(dto) => {
+                let stop_count = dto.stops.len();
+                let warning_count = dto.warnings.len();
+                self.preview = Some(dto);
+                self.status = AppStatus::PreviewSuccess {
+                    stop_count,
+                    warning_count,
+                };
+            }
+            Err(err) => {
+                let (title, detail) = format_business_error(&err);
+                self.status = AppStatus::PreviewError { title, detail };
             }
         }
     }
@@ -836,6 +933,45 @@ impl MtrApp {
                     Err(_) => {
                         this.state.status = AppStatus::CandidatesError {
                             title: "候補検索が中断されました".to_string(),
+                            detail: "バックグラウンド処理との通信が終了しました。".to_string(),
+                        };
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_preview(&mut self, cx: &mut Context<Self>) {
+        if self.state.status.is_busy() || self.state.status.is_init_failed() {
+            return;
+        }
+        let Some(candidate_id) = self.state.selected_candidate_id.clone() else {
+            self.state.status = AppStatus::PreviewError {
+                title: "照合候補が未選択です".to_string(),
+                detail: "Step 3 で照合候補を選択してください。".to_string(),
+            };
+            cx.notify();
+            return;
+        };
+        let (Some(backend), Some(session_id)) = (&self.backend, self.session_id.clone()) else {
+            return;
+        };
+
+        self.state.status = AppStatus::Previewing;
+        cx.notify();
+
+        let rx = backend.preview_conversion(session_id, candidate_id, None);
+        cx.spawn(async move |this, cx| {
+            let received = rx.await;
+            this.update(cx, |this, cx| {
+                match received {
+                    Ok(result) => this.state.apply_preview_result(result),
+                    Err(_) => {
+                        this.state.status = AppStatus::PreviewError {
+                            title: "プレビュー生成が中断されました".to_string(),
                             detail: "バックグラウンド処理との通信が終了しました。".to_string(),
                         };
                     }
@@ -2087,6 +2223,371 @@ impl MtrApp {
             )
     }
 
+    fn render_step4(&self, cx: &mut Context<Self>) -> Div {
+        let theme = &self.state.theme;
+        let c = &theme.colors;
+        let busy = self.state.status.is_busy();
+        let disabled = busy || self.state.status.is_init_failed();
+        let previewing = self.state.status.is_previewing();
+
+        let Some(candidate_id) = &self.state.selected_candidate_id else {
+            return div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
+                .child(carbon_inline_notification(
+                    NotificationKind::Info,
+                    "Step 3（路線・経路照合）が未完了です",
+                    "Step 3 で MTR 路線と OuDia の照合候補を選択してからプレビューを生成してください。",
+                    theme,
+                ));
+        };
+
+        let (preview_tag_label, preview_tag_kind) = if self.state.preview.is_some() {
+            ("生成済み", TagKind::Green)
+        } else {
+            ("未生成", TagKind::CoolGray)
+        };
+
+        let mut action_info = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(CarbonTypography::HEADING_02.font_size_px())
+                            .line_height(CarbonTypography::HEADING_02.line_height_px())
+                            .text_color(c.text_primary)
+                            .child("時刻表プレビュー生成"),
+                    )
+                    .child(carbon_tag(preview_tag_label, preview_tag_kind, theme)),
+            )
+            .child(info_row("選択中候補 ID:", candidate_id.0.clone(), theme));
+
+        if let Some(candidate) = self
+            .state
+            .route_candidates
+            .iter()
+            .find(|item| &item.id == candidate_id)
+        {
+            action_info = action_info.child(info_row(
+                "対象列車:",
+                format!(
+                    "{} / ダイヤ #{} ・ 列車 #{}",
+                    direction_label(&candidate.direction),
+                    candidate.diagram_index,
+                    candidate.train_index
+                ),
+                theme,
+            ));
+        }
+
+        let action_tile = carbon_tile(TileLayer::Layer01, theme)
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
+                    .child(action_info)
+                    .child(carbon_button(
+                        "generate-preview",
+                        preview_button_label(previewing),
+                        ButtonKind::Primary,
+                        disabled,
+                        theme,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.start_preview(cx);
+                        }),
+                    )),
+            );
+
+        let (notif_kind, notif_title, notif_subtitle) = status_notification(&self.state.status);
+        let notification =
+            carbon_inline_notification(notif_kind, notif_title, notif_subtitle, theme);
+
+        let mut result_tile = carbon_tile(TileLayer::Layer01, theme)
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_04));
+
+        if let Some(preview) = &self.state.preview {
+            let base_time = if preview.fixed_base_time.is_empty() {
+                "-".to_string()
+            } else {
+                format!(
+                    "{} ({})",
+                    preview.fixed_base_time,
+                    if preview.precision_mode {
+                        "精密入力"
+                    } else {
+                        "10:00 固定"
+                    }
+                )
+            };
+            let (midnight_label, midnight_kind) = if preview.crosses_midnight {
+                ("日跨ぎあり", TagKind::Red)
+            } else {
+                ("日跨ぎなし", TagKind::Green)
+            };
+            let (operation_label, operation_kind) = if preview.operation_present {
+                ("運用あり", TagKind::WarmGray)
+            } else {
+                ("運用なし", TagKind::CoolGray)
+            };
+
+            result_tile = result_tile.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_size(CarbonTypography::HEADING_02.font_size_px())
+                                    .line_height(CarbonTypography::HEADING_02.line_height_px())
+                                    .text_color(c.text_primary)
+                                    .child("プレビュー結果"),
+                            )
+                            .child(carbon_tag(
+                                format!("基準時刻: {base_time}"),
+                                TagKind::CoolGray,
+                                theme,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                            .child(carbon_tag(
+                                format!("{} 駅", preview.stops.len()),
+                                TagKind::Blue,
+                                theme,
+                            ))
+                            .child(carbon_tag(midnight_label, midnight_kind, theme))
+                            .child(carbon_tag(operation_label, operation_kind, theme)),
+                    ),
+            );
+
+            if !preview.warnings.is_empty() {
+                result_tile = result_tile.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                        .children(preview.warnings.iter().map(|warning| {
+                            carbon_inline_notification(
+                                NotificationKind::Warning,
+                                "警告",
+                                warning.clone(),
+                                theme,
+                            )
+                        })),
+                );
+            }
+
+            let column_header = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .min_w_0()
+                .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
+                .px(CarbonSpacing::px(CarbonSpacing::SP_04))
+                .py(CarbonSpacing::px(CarbonSpacing::SP_02))
+                .border_b_1()
+                .border_color(c.border_subtle)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(CarbonTypography::LABEL_01.font_size_px())
+                        .line_height(CarbonTypography::LABEL_01.line_height_px())
+                        .text_color(c.text_secondary)
+                        .child("駅名"),
+                )
+                .child(
+                    div()
+                        .w(px(156.0))
+                        .flex_shrink_0()
+                        .text_size(CarbonTypography::LABEL_01.font_size_px())
+                        .line_height(CarbonTypography::LABEL_01.line_height_px())
+                        .text_color(c.text_secondary)
+                        .child("既存着発"),
+                )
+                .child(
+                    div()
+                        .w(px(156.0))
+                        .flex_shrink_0()
+                        .text_size(CarbonTypography::LABEL_01.font_size_px())
+                        .line_height(CarbonTypography::LABEL_01.line_height_px())
+                        .text_color(c.text_secondary)
+                        .child("生成着発"),
+                )
+                .child(
+                    div()
+                        .w(px(72.0))
+                        .flex_shrink_0()
+                        .text_size(CarbonTypography::LABEL_01.font_size_px())
+                        .line_height(CarbonTypography::LABEL_01.line_height_px())
+                        .text_color(c.text_secondary)
+                        .child("停車秒数"),
+                );
+
+            let stops_list = if preview.stops.is_empty() {
+                div()
+                    .py(CarbonSpacing::px(CarbonSpacing::SP_04))
+                    .text_size(CarbonTypography::BODY_01.font_size_px())
+                    .line_height(CarbonTypography::BODY_01.line_height_px())
+                    .text_color(c.text_secondary)
+                    .child("停車駅データがありません")
+                    .into_any_element()
+            } else {
+                div()
+                    .id("step4-preview-stops")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                    .children(preview.stops.iter().enumerate().map(|(index, stop)| {
+                        let existing = format_arrival_departure(
+                            stop.existing_arrival.as_deref(),
+                            stop.existing_departure.as_deref(),
+                        );
+                        let generated = format_arrival_departure(
+                            stop.rounded_arrival.as_deref(),
+                            stop.rounded_departure.as_deref(),
+                        );
+                        let dwell = format_dwell_seconds(stop.dwell_millis);
+
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .min_w_0()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
+                            .px(CarbonSpacing::px(CarbonSpacing::SP_04))
+                            .py(CarbonSpacing::px(CarbonSpacing::SP_03))
+                            .bg(c.layer_02)
+                            .border_1()
+                            .border_color(c.border_subtle)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(CarbonTypography::BODY_01.font_size_px())
+                                    .line_height(CarbonTypography::BODY_01.line_height_px())
+                                    .text_color(c.text_primary)
+                                    .child(format!("{}. {}", index + 1, stop.station)),
+                            )
+                            .child(
+                                div()
+                                    .w(px(156.0))
+                                    .flex_shrink_0()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(CarbonTypography::BODY_COMPACT_01.font_size_px())
+                                    .line_height(CarbonTypography::BODY_COMPACT_01.line_height_px())
+                                    .text_color(c.text_secondary)
+                                    .child(existing),
+                            )
+                            .child(
+                                div()
+                                    .w(px(156.0))
+                                    .flex_shrink_0()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_size(CarbonTypography::BODY_COMPACT_01.font_size_px())
+                                    .line_height(CarbonTypography::BODY_COMPACT_01.line_height_px())
+                                    .text_color(c.text_primary)
+                                    .child(generated),
+                            )
+                            .child(
+                                div()
+                                    .w(px(72.0))
+                                    .flex_shrink_0()
+                                    .text_size(CarbonTypography::BODY_COMPACT_01.font_size_px())
+                                    .line_height(CarbonTypography::BODY_COMPACT_01.line_height_px())
+                                    .text_color(c.text_secondary)
+                                    .child(dwell),
+                            )
+                    }))
+                    .into_any_element()
+            };
+
+            result_tile = result_tile.child(column_header).child(stops_list);
+        } else {
+            result_tile = result_tile
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(CarbonTypography::HEADING_02.font_size_px())
+                        .line_height(CarbonTypography::HEADING_02.line_height_px())
+                        .text_color(c.text_primary)
+                        .child("プレビュー結果"),
+                )
+                .child(
+                    div()
+                        .py(CarbonSpacing::px(CarbonSpacing::SP_04))
+                        .text_size(CarbonTypography::BODY_01.font_size_px())
+                        .line_height(CarbonTypography::BODY_01.line_height_px())
+                        .text_color(c.text_secondary)
+                        .child(if previewing {
+                            "時刻表プレビューを生成しています..."
+                        } else {
+                            "「プレビュー生成」を押すと時刻表プレビューが表示されます"
+                        }),
+                );
+        }
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
+            .child(action_tile)
+            .child(notification)
+            .child(result_tile)
+    }
+
     fn render_placeholder_step(&self, step: AppStep) -> Div {
         let theme = &self.state.theme;
         let c = &theme.colors;
@@ -2155,7 +2656,8 @@ impl MtrApp {
             AppStep::Step1Mtr => self.render_step1(cx),
             AppStep::Step2Oudia => self.render_step2(cx),
             AppStep::Step3RouteMatch => self.render_step3(cx),
-            AppStep::Step4Preview | AppStep::Step5Save => self.render_placeholder_step(step),
+            AppStep::Step4Preview => self.render_step4(cx),
+            AppStep::Step5Save => self.render_placeholder_step(step),
         };
 
         div()
@@ -2798,5 +3300,261 @@ mod tests {
                 "route-0".to_string(),
             )
         );
+    }
+
+    fn dummy_preview(
+        id: &str,
+        stop_count: usize,
+        crosses_midnight: bool,
+        operation_present: bool,
+        warnings: Vec<&str>,
+    ) -> PreviewDto {
+        use mtr_oudia_application::{PreviewId, PreviewStopDto};
+        PreviewDto {
+            precision_mode: false,
+            outbound: None,
+            id: PreviewId(id.to_string()),
+            fixed_base_time: "10:00:00".to_string(),
+            stops: (0..stop_count)
+                .map(|idx| PreviewStopDto {
+                    updated_platform: None,
+                    station: format!("駅{idx}"),
+                    existing_arrival: (idx > 0).then(|| format!("09:{:02}:00", idx * 2)),
+                    existing_departure: (idx + 1 < stop_count)
+                        .then(|| format!("09:{:02}:30", idx * 2)),
+                    raw_arrival_millis: (idx > 0).then_some(36_000_000 + (idx as i64) * 120_000),
+                    raw_departure_millis: (idx + 1 < stop_count)
+                        .then_some(36_030_000 + (idx as i64) * 120_000),
+                    rounded_arrival: (idx > 0).then(|| format!("10:{:02}:00", idx * 2)),
+                    rounded_departure: (idx + 1 < stop_count)
+                        .then(|| format!("10:{:02}:30", idx * 2)),
+                    run_millis: (idx + 1 < stop_count).then_some(90_000),
+                    dwell_millis: 30_000,
+                })
+                .collect(),
+            warnings: warnings.into_iter().map(str::to_string).collect(),
+            crosses_midnight,
+            operation_present,
+            policy_choices: if operation_present {
+                vec!["preserve".to_string(), "remove_target_train".to_string()]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    #[test]
+    fn apply_preview_result_updates_state_and_preserves_consistency_on_error() {
+        let mut state = MtrShellState::new(Ok(()));
+        assert!(state.preview.is_none());
+        assert!(!state.is_step_completed(AppStep::Step4Preview));
+
+        // 初期状態での失敗時は preview 未設定のままエラー状態になる。
+        state.apply_preview_result(Err(BusinessError {
+            kind: BusinessErrorKind::StaleState,
+            message: "候補が現在のセッションにありません".to_string(),
+            detail: None,
+        }));
+        assert!(state.preview.is_none());
+        assert!(!state.is_step_completed(AppStep::Step4Preview));
+        assert_eq!(
+            state.status,
+            AppStatus::PreviewError {
+                title: "候補が現在のセッションにありません".to_string(),
+                detail: String::new(),
+            }
+        );
+
+        // 成功時は preview が確定し、Step4Preview が完了になる。
+        state.apply_preview_result(Ok(dummy_preview("preview-1", 4, false, false, Vec::new())));
+        assert_eq!(
+            state.preview.as_ref().map(|dto| dto.id.0.as_str()),
+            Some("preview-1")
+        );
+        assert!(state.is_step_completed(AppStep::Step4Preview));
+        assert_eq!(
+            state.status,
+            AppStatus::PreviewSuccess {
+                stop_count: 4,
+                warning_count: 0,
+            }
+        );
+
+        // 以降の生成失敗時もエラー状態になりつつ、既存の preview と矛盾しない。
+        state.apply_preview_result(Err(BusinessError {
+            kind: BusinessErrorKind::Validation,
+            message: "時刻表を生成できません".to_string(),
+            detail: Some("station mismatch".to_string()),
+        }));
+        assert_eq!(
+            state.preview.as_ref().map(|dto| dto.id.0.as_str()),
+            Some("preview-1")
+        );
+        assert!(state.is_step_completed(AppStep::Step4Preview));
+        assert_eq!(
+            state.status,
+            AppStatus::PreviewError {
+                title: "時刻表を生成できません".to_string(),
+                detail: "station mismatch".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn upstream_updates_clear_downstream_step4_preview() {
+        let mut state = MtrShellState::new(Ok(()));
+        state.candidates = vec![
+            "http://127.0.0.1:49182/".to_string(),
+            "http://127.0.0.1:49183/".to_string(),
+        ];
+        assert!(state.select_endpoint("http://127.0.0.1:49182/".to_string()));
+        state.apply_snapshot_result(0, Ok(dummy_snapshot(vec![("山手線", 30)])));
+        state.apply_inspection_result(
+            PathBuf::from("/tmp/yamanote.oud2"),
+            Ok(dummy_inspection("OuDiaSecond.1.04", Some("山手線"), 30)),
+        );
+        assert!(state.select_route("route-0".to_string()));
+        state.apply_candidates_result(Ok(vec![
+            dummy_candidate("cand-1", 0, 0, "PrimaryExact", true, 30),
+            dummy_candidate("cand-2", 0, 1, "Partial", false, 20),
+        ]));
+        state.apply_preview_result(Ok(dummy_preview("preview-1", 30, false, false, Vec::new())));
+        assert!(state.preview.is_some());
+        assert!(state.is_step_completed(AppStep::Step4Preview));
+
+        // Step 3 同一候補の再選択では preview を保持する。
+        assert!(state.select_candidate(CandidateId("cand-1".to_string())));
+        assert!(state.preview.is_some());
+
+        // Step 3 別候補への変更で preview がクリアされる。
+        assert!(state.select_candidate(CandidateId("cand-2".to_string())));
+        assert!(state.preview.is_none());
+        assert!(!state.is_step_completed(AppStep::Step4Preview));
+
+        // Step 3 候補再検索で preview がクリアされる。
+        state.apply_preview_result(Ok(dummy_preview("preview-2", 30, false, false, Vec::new())));
+        assert!(state.preview.is_some());
+        state.apply_candidates_result(Ok(vec![dummy_candidate(
+            "cand-3",
+            0,
+            2,
+            "PrimaryExact",
+            true,
+            30,
+        )]));
+        assert!(state.preview.is_none());
+
+        // Step 2 OuDia 更新で preview がクリアされる。
+        state.apply_preview_result(Ok(dummy_preview("preview-3", 30, false, false, Vec::new())));
+        assert!(state.preview.is_some());
+        state.apply_inspection_result(
+            PathBuf::from("/tmp/chuo.oud2"),
+            Ok(dummy_inspection("OuDiaSecond.1.04", Some("中央線"), 24)),
+        );
+        assert!(state.preview.is_none());
+
+        // Step 1 スナップショット変更で preview がクリアされる。
+        assert!(state.select_route("route-0".to_string()));
+        state.apply_candidates_result(Ok(vec![dummy_candidate(
+            "cand-4",
+            0,
+            0,
+            "PrimaryExact",
+            true,
+            24,
+        )]));
+        state.apply_preview_result(Ok(dummy_preview("preview-4", 24, false, false, Vec::new())));
+        assert!(state.preview.is_some());
+        state.apply_snapshot_result(1, Ok(dummy_snapshot(vec![("京浜東北線", 35)])));
+        assert!(state.preview.is_none());
+
+        // Step 1 検出成功で preview がクリアされる。
+        assert!(state.select_route("route-0".to_string()));
+        state.apply_candidates_result(Ok(vec![dummy_candidate(
+            "cand-5",
+            0,
+            0,
+            "PrimaryExact",
+            true,
+            35,
+        )]));
+        state.apply_preview_result(Ok(dummy_preview("preview-5", 35, false, false, Vec::new())));
+        assert!(state.preview.is_some());
+        state.apply_detection_result(Ok(vec![EndpointDto {
+            url: "http://127.0.0.1:49182/".to_string(),
+        }]));
+        assert!(state.preview.is_none());
+    }
+
+    #[test]
+    fn status_notification_maps_step4_statuses() {
+        let previewing = AppStatus::Previewing;
+        assert!(previewing.is_busy());
+        assert!(previewing.is_previewing());
+        assert_eq!(status_notification(&previewing).0, NotificationKind::Info);
+
+        let success = AppStatus::PreviewSuccess {
+            stop_count: 10,
+            warning_count: 0,
+        };
+        assert!(!success.is_busy());
+        assert_eq!(
+            status_notification(&success),
+            (
+                NotificationKind::Success,
+                "プレビュー生成完了".to_string(),
+                "10 駅の時刻表プレビューを生成しました".to_string(),
+            )
+        );
+
+        let warned = AppStatus::PreviewSuccess {
+            stop_count: 10,
+            warning_count: 1,
+        };
+        assert!(!warned.is_busy());
+        assert_eq!(
+            status_notification(&warned),
+            (
+                NotificationKind::Warning,
+                "プレビュー生成完了（警告あり）".to_string(),
+                "10 駅の時刻表を生成しましたが、1 件の警告があります".to_string(),
+            )
+        );
+
+        let err = AppStatus::PreviewError {
+            title: "時刻表を生成できません".to_string(),
+            detail: "candidate expired".to_string(),
+        };
+        assert!(!err.is_busy());
+        assert_eq!(
+            status_notification(&err),
+            (
+                NotificationKind::Error,
+                "時刻表を生成できません".to_string(),
+                "candidate expired".to_string(),
+            )
+        );
+    }
+
+    #[test]
+    fn preview_formatting_helpers_format_times_and_dwell_seconds() {
+        assert_eq!(
+            format_arrival_departure(Some("10:02:00"), Some("10:02:30")),
+            "10:02:00 / 10:02:30"
+        );
+        assert_eq!(
+            format_arrival_departure(None, Some("10:00:00")),
+            "- / 10:00:00"
+        );
+        assert_eq!(
+            format_arrival_departure(Some("10:05:00"), None),
+            "10:05:00 / -"
+        );
+        assert_eq!(format_arrival_departure(None, None), "-");
+
+        assert_eq!(format_dwell_seconds(0), "0 秒");
+        assert_eq!(format_dwell_seconds(30_000), "30 秒");
+        assert_eq!(format_dwell_seconds(15_500), "15.5 秒");
+        assert_eq!(format_dwell_seconds(12_340), "12.34 秒");
     }
 }

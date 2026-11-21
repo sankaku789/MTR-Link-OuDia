@@ -12,8 +12,9 @@ use futures::{
     stream::FuturesUnordered,
 };
 use mtr_oudia_application::{
-    BusinessError, ConversionService, ConversionSessionStore, EndpointDto, InspectionDto,
-    MtrEndpoint, RouteCandidateDto, SessionId, SnapshotDto,
+    BusinessError, CandidateId, ConversionService, ConversionSessionStore, EndpointDto,
+    InspectionDto, ManualMappingInput, MtrEndpoint, PreviewDto, RouteCandidateDto, SessionId,
+    SnapshotDto,
 };
 use mtr_oudia_infrastructure::{
     FileMinecraftLogProvider, FileOudiaRepository, JsonSettingsRepository, ReqwestMtrApiClient,
@@ -118,6 +119,12 @@ enum BackendCommand {
         train_type: Option<usize>,
         train_number: Option<String>,
         reply: oneshot::Sender<Result<Vec<RouteCandidateDto>, BusinessError>>,
+    },
+    PreviewConversion {
+        session_id: SessionId,
+        candidate_id: CandidateId,
+        manual: Option<ManualMappingInput>,
+        reply: oneshot::Sender<Result<PreviewDto, BusinessError>>,
     },
 }
 
@@ -249,6 +256,21 @@ impl AppBackend {
         })
     }
 
+    /// 選択された照合候補から時刻表プレビューを生成する。
+    pub fn preview_conversion(
+        &self,
+        session_id: SessionId,
+        candidate_id: CandidateId,
+        manual: Option<ManualMappingInput>,
+    ) -> oneshot::Receiver<Result<PreviewDto, BusinessError>> {
+        self.dispatch(|reply| BackendCommand::PreviewConversion {
+            session_id,
+            candidate_id,
+            manual,
+            reply,
+        })
+    }
+
     /// 待受ポート列挙による MTR 自動検出に対応している環境かどうかを返す。
     pub fn auto_detection_supported() -> bool {
         cfg!(target_os = "windows")
@@ -344,6 +366,21 @@ fn run_worker_loop(
                                 train_type,
                                 train_number.as_deref(),
                             );
+                            let _ = reply.send(result);
+                        }
+                        .boxed_local(),
+                    );
+                }
+                BackendCommand::PreviewConversion {
+                    session_id,
+                    candidate_id,
+                    manual,
+                    reply,
+                } => {
+                    in_flight.push(
+                        async move {
+                            let result =
+                                service.build_preview(&session_id, Some(&candidate_id), manual);
                             let _ = reply.send(result);
                         }
                         .boxed_local(),
