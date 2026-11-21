@@ -2259,18 +2259,16 @@ impl MtrApp {
         };
 
         let mut connection_tile = carbon_tile(TileLayer::Layer01, theme)
+            .min_w_0()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
             .child(
                 div()
+                    .min_w_0()
                     .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
+                    .flex_col()
                     .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
                     .child(
                         div()
-                            .flex_1()
                             .min_w_0()
                             .flex()
                             .flex_col()
@@ -2279,6 +2277,7 @@ impl MtrApp {
                                 div()
                                     .flex()
                                     .flex_row()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
                                     .child(
@@ -2525,13 +2524,16 @@ impl MtrApp {
         };
 
         let routes_tile = carbon_tile(TileLayer::Layer01, theme)
+            .min_w_0()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
             .child(
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
@@ -2577,17 +2579,16 @@ impl MtrApp {
         };
 
         let file_tile = carbon_tile(TileLayer::Layer01, theme)
+            .min_w_0()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
             .child(
                 div()
+                    .min_w_0()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
+                    .flex_col()
                     .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
                     .child(
                         div()
-                            .flex_1()
                             .min_w_0()
                             .flex()
                             .flex_col()
@@ -2596,6 +2597,7 @@ impl MtrApp {
                                 div()
                                     .flex()
                                     .flex_row()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
                                     .child(
@@ -2612,16 +2614,24 @@ impl MtrApp {
                             )
                             .child(info_row("選択ファイル:", path_display, theme)),
                     )
-                    .child(carbon_button(
-                        "select-oudia-file",
-                        inspect_button_label(inspecting),
-                        ButtonKind::Primary,
-                        disabled,
-                        theme,
-                        cx.listener(|this, _: &ClickEvent, _window, cx| {
-                            this.start_select_oudia(cx);
-                        }),
-                    )),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                            .child(carbon_button(
+                                "select-oudia-file",
+                                inspect_button_label(inspecting),
+                                ButtonKind::Primary,
+                                disabled,
+                                theme,
+                                cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                    this.start_select_oudia(cx);
+                                }),
+                            )),
+                    ),
             );
 
         let inspection_content = if let Some(inspection) = &self.state.inspection {
@@ -2802,6 +2812,7 @@ impl MtrApp {
         };
 
         let inspection_tile = carbon_tile(TileLayer::Layer01, theme)
+            .min_w_0()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
             .child(
                 div()
@@ -2962,11 +2973,13 @@ impl MtrApp {
         let routes_tile = carbon_tile(TileLayer::Layer01, theme)
             .flex_1()
             .min_w_0()
+            .overflow_hidden()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
             .child(
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
                     .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
@@ -3069,11 +3082,13 @@ impl MtrApp {
 
         let search_disabled = disabled || self.state.selected_route_id.is_none();
         let filter_tile = carbon_tile(TileLayer::Layer01, theme)
+            .min_w_0()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
             .child(
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
                     .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
@@ -3157,13 +3172,14 @@ impl MtrApp {
                         div()
                             .flex()
                             .flex_row()
+                            .flex_wrap()
                             .items_center()
                             .min_w_0()
                             .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
                             .child(
                                 div()
                                     .flex_1()
-                                    .min_w_0()
+                                    .min_w(px(160.0))
                                     .child(self.train_number_input.clone()),
                             )
                             .child(carbon_button(
@@ -3362,6 +3378,7 @@ impl MtrApp {
                         div()
                             .flex_1()
                             .min_w_0()
+                            .overflow_hidden()
                             .flex()
                             .flex_col()
                             .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
@@ -3637,7 +3654,6 @@ impl MtrApp {
             .unwrap_or_else(|| self.state.searched_train_number.is_some());
 
         let mut action_info = div()
-            .flex_1()
             .min_w_0()
             .flex()
             .flex_col()
@@ -3714,25 +3730,33 @@ impl MtrApp {
         }
 
         let action_tile = carbon_tile(TileLayer::Layer01, theme)
+            .min_w_0()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
             .child(
                 div()
+                    .min_w_0()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
+                    .flex_col()
                     .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
                     .child(action_info)
-                    .child(carbon_button(
-                        "generate-preview",
-                        preview_button_label(previewing),
-                        ButtonKind::Primary,
-                        disabled,
-                        theme,
-                        cx.listener(|this, _: &ClickEvent, _window, cx| {
-                            this.start_preview(cx);
-                        }),
-                    )),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                            .child(carbon_button(
+                                "generate-preview",
+                                preview_button_label(previewing),
+                                ButtonKind::Primary,
+                                disabled,
+                                theme,
+                                cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                    this.start_preview(cx);
+                                }),
+                            )),
+                    ),
             );
 
         // 精密入力モード設定パネル
@@ -3773,6 +3797,7 @@ impl MtrApp {
                         div()
                             .flex()
                             .flex_row()
+                            .flex_wrap()
                             .items_center()
                             .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
                             .child(
@@ -3903,6 +3928,7 @@ impl MtrApp {
                         div()
                             .flex()
                             .flex_row()
+                            .flex_wrap()
                             .items_center()
                             .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
                             .child(
@@ -4000,12 +4026,48 @@ impl MtrApp {
             .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
             .child(
                 div()
+                    .min_w_0()
                     .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
+                    .flex_col()
                     .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_size(CarbonTypography::HEADING_02.font_size_px())
+                                            .line_height(
+                                                CarbonTypography::HEADING_02.line_height_px(),
+                                            )
+                                            .text_color(c.text_primary)
+                                            .child("出庫時分計測・出区設定"),
+                                    )
+                                    .child(carbon_tag(outbound_tag_label, outbound_tag_kind, theme)),
+                            )
+                            .child(info_row(
+                                "始発駅 / ホーム:",
+                                format!("{first_station_name} / {first_platform_name}"),
+                                theme,
+                            ))
+                            .child(info_row(
+                                "出庫 → 始発駅所要時間:",
+                                format!(
+                                    "{outbound_duration_display}（始発駅停車: {first_dwell_display} / 方式: {outbound_source_display}）"
+                                ),
+                                theme,
+                            )),
+                    )
                     .child(
                         div()
                             .flex()
@@ -4013,43 +4075,24 @@ impl MtrApp {
                             .flex_wrap()
                             .items_center()
                             .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_size(CarbonTypography::HEADING_02.font_size_px())
-                                    .line_height(CarbonTypography::HEADING_02.line_height_px())
-                                    .text_color(c.text_primary)
-                                    .child("出庫時分計測・出区設定"),
-                            )
-                            .child(carbon_tag(outbound_tag_label, outbound_tag_kind, theme)),
-                    )
-                    .child(carbon_button(
-                        "step4-toggle-generate-outbound",
-                        generate_outbound_button_label(self.state.generate_outbound),
-                        if self.state.generate_outbound {
-                            ButtonKind::Primary
-                        } else {
-                            ButtonKind::Secondary
-                        },
-                        toggle_outbound_disabled,
-                        theme,
-                        cx.listener(|this, _: &ClickEvent, _window, cx| {
-                            if this.state.toggle_generate_outbound() {
-                                cx.notify();
-                            }
-                        }),
-                    )),
-            )
-            .child(info_row(
-                "始発駅 / ホーム:",
-                format!("{first_station_name} / {first_platform_name}"),
-                theme,
-            ))
-            .child(info_row(
-                "出庫 → 始発駅所要時間:",
-                format!("{outbound_duration_display}（始発駅停車: {first_dwell_display} / 方式: {outbound_source_display}）"),
-                theme,
-            ));
+                            .child(carbon_button(
+                                "step4-toggle-generate-outbound",
+                                generate_outbound_button_label(self.state.generate_outbound),
+                                if self.state.generate_outbound {
+                                    ButtonKind::Primary
+                                } else {
+                                    ButtonKind::Secondary
+                                },
+                                toggle_outbound_disabled,
+                                theme,
+                                cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                    if this.state.toggle_generate_outbound() {
+                                        cx.notify();
+                                    }
+                                }),
+                            )),
+                    ),
+            );
 
         if let Some(message) = self
             .state
@@ -4521,17 +4564,16 @@ impl MtrApp {
             .unwrap_or_else(|| "未選択".to_string());
 
         let action_tile = carbon_tile(TileLayer::Layer01, theme)
+            .min_w_0()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
             .child(
                 div()
+                    .min_w_0()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
+                    .flex_col()
                     .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
                     .child(
                         div()
-                            .flex_1()
                             .min_w_0()
                             .flex()
                             .flex_col()
@@ -4540,6 +4582,7 @@ impl MtrApp {
                                 div()
                                     .flex()
                                     .flex_row()
+                                    .flex_wrap()
                                     .items_center()
                                     .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
                                     .child(
@@ -4607,6 +4650,7 @@ impl MtrApp {
 
         let result_tile = if let Some(receipt) = &self.state.save_receipt {
             carbon_tile(TileLayer::Layer01, theme)
+                .min_w_0()
                 .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
                 .child(
                     div()
