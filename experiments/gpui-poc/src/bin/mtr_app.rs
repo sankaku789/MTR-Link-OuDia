@@ -5,20 +5,20 @@
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    App, Application, Bounds, ClickEvent, Context, Div, FontWeight, IntoElement, ParentElement,
-    Render, Rgba, ScrollHandle, ScrollWheelEvent, SharedString, Styled, Subscription, Window,
-    WindowAppearance, WindowBounds, WindowOptions, div, prelude::*, px, size,
+    App, Application, Bounds, ClickEvent, Context, Div, Entity, FontWeight, Hsla, IntoElement,
+    ParentElement, Render, Rgba, ScrollHandle, ScrollWheelEvent, SharedString, Styled,
+    Subscription, Window, WindowAppearance, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
-use gpui_poc::backend::{
-    AppBackend, RefreshSnapshotOutcome, format_business_error, snapshot_routes_changed,
-};
+use gpui_poc::backend::{AppBackend, RefreshSnapshotOutcome, format_business_error};
 use gpui_poc::carbon::{
     ButtonKind, CarbonSpacing, CarbonTheme, CarbonThemeKind, CarbonTypography, NotificationKind,
     TagKind, TileLayer, carbon_button, carbon_inline_notification, carbon_tag, carbon_tile,
 };
+use gpui_poc::text_input::{TextInput, TextInputStyle, bind_keys as bind_text_input_keys};
 use mtr_oudia_application::{
-    BusinessError, CandidateId, EndpointDto, InspectionDto, MtrEndpoint, PreviewDto, PreviewId,
-    RouteCandidateDto, SaveReceipt, SessionId, SnapshotDto,
+    BusinessError, CandidateId, EndpointDto, InspectionDto, ManualMappingInput, MtrEndpoint,
+    PreviewDto, PreviewId, RouteCandidateDto, RouteDto, SaveReceipt, SessionId, SnapshotDto,
+    StationMappingDto, StationSlotDto, TemplateDto,
 };
 
 const TRANSPARENT: Rgba = Rgba {
@@ -591,6 +591,104 @@ fn format_dimension_label(index: usize, value: &impl std::fmt::Display) -> Strin
     format!("{index}: {display}")
 }
 
+/// 列車番号入力文字列をトリムし、空文字なら `None` に正規化する。
+pub fn normalize_train_number_input(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn with_alpha_hsla(color: Rgba, alpha: f32) -> Hsla {
+    let mut hsla: Hsla = color.into();
+    hsla.a = alpha;
+    hsla
+}
+
+fn carbon_text_input_style(theme: &CarbonTheme) -> TextInputStyle {
+    let c = &theme.colors;
+    TextInputStyle {
+        bg: c.layer_02.into(),
+        outer_bg: TRANSPARENT.into(),
+        border_color: Some(c.border_strong.into()),
+        focus_border_color: Some(c.focus.into()),
+        text_color: c.text_primary.into(),
+        placeholder_color: with_alpha_hsla(c.text_secondary, 0.7),
+        cursor_color: c.button_primary.into(),
+        text_size: CarbonTypography::BODY_01.font_size_px(),
+        line_height: CarbonTypography::BODY_01.line_height_px(),
+        height: px(40.0),
+        padding_x: CarbonSpacing::px(CarbonSpacing::SP_04),
+        padding_y: px(10.0),
+    }
+}
+
+fn format_station_slot_label(slot: &StationSlotDto) -> String {
+    let name = if slot.name.is_empty() {
+        "名称なし"
+    } else {
+        slot.name.as_str()
+    };
+    let kind = match slot.handling_code {
+        Some(1) => "停車",
+        Some(2) => "通過",
+        Some(3) => "経由なし",
+        _ => "未指定",
+    };
+    format!("#{} {name} ({kind})", slot.index)
+}
+
+fn station_mapping_issues(
+    route: &RouteDto,
+    template: &TemplateDto,
+    mappings: &[StationMappingDto],
+) -> Vec<String> {
+    let mut issues = Vec::new();
+    let mut slot_to_stations: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
+
+    for (mtr_idx, station) in route.stations.iter().enumerate() {
+        let assigned: Vec<usize> = mappings
+            .iter()
+            .filter(|m| m.mtr_station_index == mtr_idx)
+            .map(|m| m.oudia_station_slot)
+            .collect();
+        if assigned.is_empty() {
+            issues.push(format!("MTR 駅「{}」が未割当です", station.station_name));
+        }
+        for slot in assigned {
+            slot_to_stations.entry(slot).or_default().push(mtr_idx);
+        }
+    }
+
+    for slot in &template.active_station_slots {
+        match slot_to_stations.get(&slot.index) {
+            None => {
+                let name = if slot.name.is_empty() {
+                    "名称なし"
+                } else {
+                    slot.name.as_str()
+                };
+                issues.push(format!(
+                    "OuDia 駅スロット #{}「{name}」が未割当です",
+                    slot.index
+                ));
+            }
+            Some(stations) if stations.len() > 1 => {
+                issues.push(format!(
+                    "OuDia 駅スロット #{} が複数の MTR 駅に重複割当されています",
+                    slot.index
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    issues
+}
+
 /// スクロール位置から現在表示中のステップを判定する。
 ///
 /// 末尾付近までスクロールされている場合は最後のステップ (`Step5Save`) を優先する。
@@ -618,6 +716,7 @@ struct MtrShellState {
     selected_train_type: Option<usize>,
     route_candidates: Vec<RouteCandidateDto>,
     selected_candidate_id: Option<CandidateId>,
+    manual_station_mappings: Option<Vec<StationMappingDto>>,
     preview: Option<PreviewDto>,
     save_receipt: Option<SaveReceipt>,
     status: AppStatus,
@@ -650,6 +749,7 @@ impl MtrShellState {
             selected_train_type: None,
             route_candidates: Vec::new(),
             selected_candidate_id: None,
+            manual_station_mappings: None,
             preview: None,
             save_receipt: None,
             status,
@@ -696,6 +796,7 @@ impl MtrShellState {
     fn clear_candidate_selection(&mut self) {
         self.route_candidates.clear();
         self.selected_candidate_id = None;
+        self.manual_station_mappings = None;
         self.preview = None;
         self.save_receipt = None;
     }
@@ -887,9 +988,96 @@ impl MtrShellState {
         if self.route_candidates.iter().any(|c| c.id == candidate_id) {
             if self.selected_candidate_id.as_ref() != Some(&candidate_id) {
                 self.selected_candidate_id = Some(candidate_id);
+                self.manual_station_mappings = None;
                 self.preview = None;
                 self.save_receipt = None;
             }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn selected_route(&self) -> Option<&RouteDto> {
+        let route_id = self.selected_route_id.as_deref()?;
+        self.snapshot
+            .as_ref()?
+            .routes
+            .iter()
+            .find(|route| route.id == route_id)
+    }
+
+    fn selected_candidate(&self) -> Option<&RouteCandidateDto> {
+        let candidate_id = self.selected_candidate_id.as_ref()?;
+        self.route_candidates
+            .iter()
+            .find(|candidate| &candidate.id == candidate_id)
+    }
+
+    fn selected_template(&self) -> Option<&TemplateDto> {
+        let candidate = self.selected_candidate()?;
+        self.inspection.as_ref()?.templates.iter().find(|template| {
+            template.diagram_index == candidate.diagram_index
+                && template.train_index == candidate.train_index
+                && template.direction == candidate.direction
+        })
+    }
+
+    fn effective_station_mappings(&self) -> Option<&[StationMappingDto]> {
+        if let Some(manual) = self.manual_station_mappings.as_deref() {
+            Some(manual)
+        } else {
+            self.selected_candidate()
+                .map(|candidate| candidate.station_mappings.as_slice())
+        }
+    }
+
+    fn set_manual_station_slot(
+        &mut self,
+        mtr_station_index: usize,
+        oudia_station_slot: usize,
+    ) -> bool {
+        if self.status.is_busy() || self.status.is_init_failed() {
+            return false;
+        }
+        let Some(candidate) = self.selected_candidate() else {
+            return false;
+        };
+        let mut mappings = self
+            .manual_station_mappings
+            .clone()
+            .unwrap_or_else(|| candidate.station_mappings.clone());
+
+        let already_assigned = mappings.iter().any(|m| {
+            m.mtr_station_index == mtr_station_index && m.oudia_station_slot == oudia_station_slot
+        });
+        if already_assigned {
+            mappings.retain(|m| {
+                !(m.mtr_station_index == mtr_station_index
+                    && m.oudia_station_slot == oudia_station_slot)
+            });
+        } else {
+            mappings.retain(|m| m.oudia_station_slot != oudia_station_slot);
+            mappings.push(StationMappingDto {
+                mtr_station_index,
+                oudia_station_slot,
+            });
+        }
+        mappings.sort_by_key(|m| (m.mtr_station_index, m.oudia_station_slot));
+
+        self.manual_station_mappings = Some(mappings);
+        self.preview = None;
+        self.save_receipt = None;
+        true
+    }
+
+    fn reset_manual_station_mappings(&mut self) -> bool {
+        if self.status.is_busy() || self.status.is_init_failed() {
+            return false;
+        }
+        if self.manual_station_mappings.take().is_some() {
+            self.preview = None;
+            self.save_receipt = None;
             true
         } else {
             false
@@ -907,6 +1095,7 @@ impl MtrShellState {
                 let auto_selected = auto_selected_id.is_some();
                 self.route_candidates = candidates;
                 self.selected_candidate_id = auto_selected_id;
+                self.manual_station_mappings = None;
                 self.preview = None;
                 self.save_receipt = None;
                 self.status = AppStatus::CandidatesFound {
@@ -960,6 +1149,7 @@ struct MtrApp {
     backend: Option<AppBackend>,
     session_id: Option<SessionId>,
     state: MtrShellState,
+    train_number_input: Entity<TextInput>,
     steps_scroll_handle: ScrollHandle,
     sync_step_from_scroll: bool,
     _appearance_subscription: Subscription,
@@ -971,36 +1161,40 @@ impl MtrApp {
         let appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
             this.state
                 .set_os_dark(is_dark_appearance(window.appearance()));
+            this.sync_input_theme(cx);
             cx.notify();
         });
 
-        match AppBackend::new() {
+        let init_result = AppBackend::new();
+        let (backend, session_id, mut state) = match init_result {
             Ok(backend) => {
                 let session_id = backend.create_session();
-                let mut state = MtrShellState::new(Ok(()));
-                state.set_os_dark(os_dark);
-                Self {
-                    backend: Some(backend),
-                    session_id: Some(session_id),
-                    state,
-                    steps_scroll_handle: ScrollHandle::new(),
-                    sync_step_from_scroll: false,
-                    _appearance_subscription: appearance_subscription,
-                }
+                (Some(backend), Some(session_id), MtrShellState::new(Ok(())))
             }
-            Err(err) => {
-                let mut state = MtrShellState::new(Err(err));
-                state.set_os_dark(os_dark);
-                Self {
-                    backend: None,
-                    session_id: None,
-                    state,
-                    steps_scroll_handle: ScrollHandle::new(),
-                    sync_step_from_scroll: false,
-                    _appearance_subscription: appearance_subscription,
-                }
-            }
+            Err(err) => (None, None, MtrShellState::new(Err(err))),
+        };
+        state.set_os_dark(os_dark);
+
+        let input_style = carbon_text_input_style(&state.theme);
+        let train_number_input = cx.new(|cx| {
+            TextInput::new("列車番号（任意・指定時は全ダイヤ横断）", cx).with_style(input_style)
+        });
+
+        Self {
+            backend,
+            session_id,
+            state,
+            train_number_input,
+            steps_scroll_handle: ScrollHandle::new(),
+            sync_step_from_scroll: false,
+            _appearance_subscription: appearance_subscription,
         }
+    }
+
+    fn sync_input_theme(&self, cx: &mut Context<Self>) {
+        let style = carbon_text_input_style(&self.state.theme);
+        self.train_number_input
+            .update(cx, |input, cx| input.set_style(style, cx));
     }
 
     fn start_detect(&mut self, cx: &mut Context<Self>) {
@@ -1252,11 +1446,17 @@ impl MtrApp {
 
         let diagram_index = self.state.selected_diagram_index;
         let train_type = self.state.selected_train_type;
+        let train_number = normalize_train_number_input(self.train_number_input.read(cx).text());
         self.state.status = AppStatus::FindingCandidates;
         cx.notify();
 
-        let rx =
-            backend.find_route_candidates(session_id, route_id, diagram_index, train_type, None);
+        let rx = backend.find_route_candidates(
+            session_id,
+            route_id,
+            diagram_index,
+            train_type,
+            train_number,
+        );
         cx.spawn(async move |this, cx| {
             let received = rx.await;
             this.update(cx, |this, cx| {
@@ -1292,10 +1492,15 @@ impl MtrApp {
             return;
         };
 
+        let manual = self
+            .state
+            .manual_station_mappings
+            .clone()
+            .map(|station_mappings| ManualMappingInput { station_mappings });
         self.state.status = AppStatus::Previewing;
         cx.notify();
 
-        let rx = backend.preview_conversion(session_id, candidate_id, None);
+        let rx = backend.preview_conversion(session_id, candidate_id, manual);
         cx.spawn(async move |this, cx| {
             let received = rx.await;
             this.update(cx, |this, cx| {
@@ -1442,6 +1647,7 @@ impl MtrApp {
                         theme,
                         cx.listener(|this, _: &ClickEvent, _window, cx| {
                             this.state.toggle_dark_mode();
+                            this.sync_input_theme(cx);
                             cx.notify();
                         }),
                     ))
@@ -1459,6 +1665,7 @@ impl MtrApp {
                             this.state
                                 .set_os_dark(is_dark_appearance(window.appearance()));
                             this.state.set_theme_preference(ThemePreference::System);
+                            this.sync_input_theme(cx);
                             cx.notify();
                         }),
                     )),
@@ -2448,6 +2655,46 @@ impl MtrApp {
                             .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
                             .children(train_type_buttons),
                     ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                    .child(
+                        div()
+                            .text_size(CarbonTypography::LABEL_01.font_size_px())
+                            .line_height(CarbonTypography::LABEL_01.line_height_px())
+                            .text_color(c.text_secondary)
+                            .child("列車番号"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .min_w_0()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(self.train_number_input.clone()),
+                            )
+                            .child(carbon_button(
+                                "step3-clear-train-number",
+                                "クリア",
+                                ButtonKind::Ghost,
+                                disabled || self.train_number_input.read(cx).text().is_empty(),
+                                theme,
+                                cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                    this.train_number_input
+                                        .update(cx, |input, cx| input.clear(cx));
+                                    cx.notify();
+                                }),
+                            )),
+                    ),
             );
 
         let candidate_list_content = if self.state.route_candidates.is_empty() {
@@ -2612,6 +2859,8 @@ impl MtrApp {
             )
             .child(candidate_list_content);
 
+        let mapping_tile = self.render_step3_station_mapping_tile(disabled, cx);
+
         div()
             .min_w_0()
             .flex()
@@ -2636,6 +2885,237 @@ impl MtrApp {
                             .child(candidates_tile),
                     ),
             )
+            .child(mapping_tile)
+    }
+
+    fn render_step3_station_mapping_tile(&self, disabled: bool, cx: &mut Context<Self>) -> Div {
+        let theme = &self.state.theme;
+        let c = &theme.colors;
+        let has_manual_edits = self.state.manual_station_mappings.is_some();
+
+        let (status_label, status_kind) = if let Some(candidate) = self.state.selected_candidate() {
+            if has_manual_edits {
+                ("手動編集あり", TagKind::Blue)
+            } else if candidate.manual_only {
+                ("手動対応が必要", TagKind::WarmGray)
+            } else {
+                ("自動マッピング", TagKind::Green)
+            }
+        } else {
+            ("候補未選択", TagKind::CoolGray)
+        };
+
+        let mut tile = carbon_tile(TileLayer::Layer01, theme)
+            .min_w_0()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_size(CarbonTypography::HEADING_02.font_size_px())
+                                    .line_height(CarbonTypography::HEADING_02.line_height_px())
+                                    .text_color(c.text_primary)
+                                    .child("駅マッピング編集"),
+                            )
+                            .child(carbon_tag(status_label, status_kind, theme)),
+                    )
+                    .child(carbon_button(
+                        "step3-reset-manual-mapping",
+                        "自動マッピングに戻す",
+                        ButtonKind::Ghost,
+                        disabled || !has_manual_edits,
+                        theme,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            if this.state.reset_manual_station_mappings() {
+                                cx.notify();
+                            }
+                        }),
+                    )),
+            );
+
+        let (Some(candidate), Some(route)) =
+            (self.state.selected_candidate(), self.state.selected_route())
+        else {
+            return tile.child(
+                div()
+                    .py(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .text_size(CarbonTypography::BODY_01.font_size_px())
+                    .line_height(CarbonTypography::BODY_01.line_height_px())
+                    .text_color(c.text_secondary)
+                    .child(
+                        "照合候補を選択すると、MTR 駅と OuDia 駅スロットの対応を確認・編集できます",
+                    ),
+            );
+        };
+
+        let Some(template) = self.state.selected_template() else {
+            return tile.child(
+                div()
+                    .py(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .text_size(CarbonTypography::BODY_01.font_size_px())
+                    .line_height(CarbonTypography::BODY_01.line_height_px())
+                    .text_color(c.text_secondary)
+                    .child(format!(
+                        "対象テンプレート（{} / ダイヤ #{} ・ 列車 #{}）の駅スロット情報が見つかりません",
+                        direction_label(&candidate.direction),
+                        candidate.diagram_index,
+                        candidate.train_index
+                    )),
+            );
+        };
+
+        let effective = self.state.effective_station_mappings().unwrap_or(&[]);
+        tile = tile.child(info_row(
+            "対象テンプレート:",
+            format!(
+                "{} / ダイヤ #{} ・ 列車 #{}（有効スロット {} 件）",
+                direction_label(&candidate.direction),
+                candidate.diagram_index,
+                candidate.train_index,
+                template.active_station_slots.len()
+            ),
+            theme,
+        ));
+
+        let issues = station_mapping_issues(route, template, effective);
+        if !issues.is_empty() {
+            tile = tile.child(carbon_inline_notification(
+                NotificationKind::Warning,
+                "駅対応の確認が必要です",
+                issues.join(" / "),
+                theme,
+            ));
+        }
+
+        if route.stations.is_empty() || template.active_station_slots.is_empty() {
+            return tile.child(
+                div()
+                    .py(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .text_size(CarbonTypography::BODY_01.font_size_px())
+                    .line_height(CarbonTypography::BODY_01.line_height_px())
+                    .text_color(c.text_secondary)
+                    .child("対応付け可能な駅または OuDia 駅スロットがありません"),
+            );
+        }
+
+        let rows = route.stations.iter().enumerate().map(|(mtr_idx, station)| {
+            let mapped_slots: Vec<usize> = effective
+                .iter()
+                .filter(|m| m.mtr_station_index == mtr_idx)
+                .map(|m| m.oudia_station_slot)
+                .collect();
+
+            let mut header_tags = div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap(CarbonSpacing::px(CarbonSpacing::SP_02));
+            if !station.platform_name.is_empty() {
+                header_tags = header_tags.child(carbon_tag(
+                    format!("ホーム: {}", station.platform_name),
+                    TagKind::CoolGray,
+                    theme,
+                ));
+            }
+            if mapped_slots.is_empty() {
+                header_tags = header_tags.child(carbon_tag("未割当", TagKind::Red, theme));
+            } else {
+                for slot_idx in &mapped_slots {
+                    let slot_label = template
+                        .active_station_slots
+                        .iter()
+                        .find(|slot| slot.index == *slot_idx)
+                        .map(format_station_slot_label)
+                        .unwrap_or_else(|| format!("スロット #{slot_idx}"));
+                    header_tags = header_tags.child(carbon_tag(
+                        format!("→ {slot_label}"),
+                        TagKind::Blue,
+                        theme,
+                    ));
+                }
+            }
+
+            let slot_buttons = template.active_station_slots.iter().map(|slot| {
+                let slot_idx = slot.index;
+                let is_assigned = mapped_slots.contains(&slot_idx);
+                carbon_button(
+                    SharedString::from(format!("step3-map-{mtr_idx}-slot-{slot_idx}")),
+                    format_station_slot_label(slot),
+                    if is_assigned {
+                        ButtonKind::Primary
+                    } else {
+                        ButtonKind::Secondary
+                    },
+                    disabled,
+                    theme,
+                    cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                        if this.state.set_manual_station_slot(mtr_idx, slot_idx) {
+                            cx.notify();
+                        }
+                    }),
+                )
+            });
+
+            div()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                .px(CarbonSpacing::px(CarbonSpacing::SP_04))
+                .py(CarbonSpacing::px(CarbonSpacing::SP_03))
+                .bg(c.layer_02)
+                .border_1()
+                .border_color(c.border_subtle)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                        .child(
+                            div()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(CarbonTypography::BODY_01.font_size_px())
+                                .line_height(CarbonTypography::BODY_01.line_height_px())
+                                .text_color(c.text_primary)
+                                .child(format!("{}. {}", mtr_idx + 1, station.station_name)),
+                        )
+                        .child(header_tags),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                        .children(slot_buttons),
+                )
+        });
+
+        tile.child(
+            div()
+                .id("step3-station-mappings")
+                .flex()
+                .flex_col()
+                .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                .children(rows),
+        )
     }
 
     fn render_step4(&self, cx: &mut Context<Self>) -> Div {
@@ -3309,6 +3789,7 @@ fn info_row(label: &'static str, value: impl Into<SharedString>, theme: &CarbonT
 
 fn main() {
     Application::new().run(|cx: &mut App| {
+        bind_text_input_keys(cx);
         let bounds = Bounds::centered(None, size(px(960.0), px(680.0)), cx);
         cx.open_window(
             WindowOptions {
@@ -3325,6 +3806,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_poc::backend::snapshot_routes_changed;
     use mtr_oudia_application::{BusinessErrorKind, DiagramDto, RouteDto};
 
     fn dummy_snapshot(routes: Vec<(&str, usize)>) -> SnapshotDto {
@@ -4734,5 +5216,293 @@ mod tests {
         let notif_unchanged = status_notification(&unchanged);
         assert_eq!(notif_unchanged.0, NotificationKind::Info);
         assert_eq!(notif_unchanged.1, "変化なし（キャッシュ未更新）");
+    }
+
+    #[test]
+    fn normalize_train_number_input_trims_and_handles_empty() {
+        assert_eq!(normalize_train_number_input(""), None);
+        assert_eq!(normalize_train_number_input("   \t\n "), None);
+        assert_eq!(
+            normalize_train_number_input("101M"),
+            Some("101M".to_string())
+        );
+        assert_eq!(
+            normalize_train_number_input("  101M \t"),
+            Some("101M".to_string())
+        );
+    }
+
+    fn mapping_pairs(mappings: Option<&[StationMappingDto]>) -> Vec<(usize, usize)> {
+        mappings
+            .unwrap_or(&[])
+            .iter()
+            .map(|m| (m.mtr_station_index, m.oudia_station_slot))
+            .collect()
+    }
+
+    #[test]
+    fn manual_station_mapping_updates_resets_and_clears_downstream() {
+        let mut state = MtrShellState::new(Ok(()));
+        // 候補未選択時は編集・リセットとも無効
+        assert!(!state.set_manual_station_slot(0, 1));
+        assert!(!state.reset_manual_station_mappings());
+        assert!(state.manual_station_mappings.is_none());
+
+        state.apply_snapshot_result(
+            0,
+            Ok(dummy_detailed_snapshot(
+                vec![(
+                    "r1",
+                    "山手線",
+                    vec![
+                        ("東京", "1", 10_000, Some(120_000)),
+                        ("神田", "2", 10_000, None),
+                    ],
+                )],
+                1_000,
+            )),
+        );
+        state.apply_inspection_result(
+            PathBuf::from("/tmp/yamanote.oud2"),
+            Ok(dummy_inspection("OuDiaSecond.1.04", Some("山手線"), 3)),
+        );
+        assert!(state.select_route("r1".to_string()));
+        state.apply_candidates_result(Ok(vec![
+            dummy_candidate("cand-1", 0, 0, "PrimaryExact", true, 2),
+            dummy_candidate("cand-2", 0, 1, "manual", false, 0),
+        ]));
+        assert!(state.manual_station_mappings.is_none());
+        assert_eq!(
+            mapping_pairs(state.effective_station_mappings()),
+            vec![(0, 0), (1, 1)]
+        );
+
+        // Step 4 / Step 5 完了状態を構築
+        state.apply_preview_result(Ok(dummy_preview("preview-1", 2, false, false, Vec::new())));
+        state.apply_save_result(Ok(dummy_save_receipt(
+            "/tmp/yamanote_converted.oud2",
+            1024,
+            "sha-1",
+        )));
+
+        // 同一スロットの再設定は no-op として扱い下流をクリアしない
+        assert!(!state.set_manual_station_slot(0, 0));
+        assert!(state.manual_station_mappings.is_none());
+        assert!(state.preview.is_some());
+        assert!(state.save_receipt.is_some());
+
+        // 別スロットへ変更すると手動マッピングが保持され、Step 4/5 がクリアされる
+        assert!(state.set_manual_station_slot(0, 2));
+        assert_eq!(
+            mapping_pairs(state.manual_station_mappings.as_deref()),
+            vec![(0, 2), (1, 1)]
+        );
+        assert_eq!(
+            mapping_pairs(state.effective_station_mappings()),
+            vec![(0, 2), (1, 1)]
+        );
+        assert!(state.preview.is_none());
+        assert!(state.save_receipt.is_none());
+
+        // Step 4/5 を再度埋めた後、「自動マッピングに戻す」で手動編集と下流がクリアされる
+        state.apply_preview_result(Ok(dummy_preview("preview-2", 2, false, false, Vec::new())));
+        state.apply_save_result(Ok(dummy_save_receipt(
+            "/tmp/yamanote_converted.oud2",
+            1024,
+            "sha-2",
+        )));
+        assert!(state.reset_manual_station_mappings());
+        assert!(state.manual_station_mappings.is_none());
+        assert_eq!(
+            mapping_pairs(state.effective_station_mappings()),
+            vec![(0, 0), (1, 1)]
+        );
+        assert!(state.preview.is_none());
+        assert!(state.save_receipt.is_none());
+        assert!(!state.reset_manual_station_mappings());
+
+        // manual_only 候補（初期マッピング空）への手動割当も機能する
+        assert!(state.select_candidate(CandidateId("cand-2".to_string())));
+        assert!(mapping_pairs(state.effective_station_mappings()).is_empty());
+        assert!(state.set_manual_station_slot(1, 2));
+        assert_eq!(
+            mapping_pairs(state.manual_station_mappings.as_deref()),
+            vec![(1, 2)]
+        );
+    }
+
+    #[test]
+    fn manual_station_mapping_clears_on_candidate_and_upstream_changes() {
+        let mut state = MtrShellState::new(Ok(()));
+        state.candidates = vec![
+            "http://127.0.0.1:49182/".to_string(),
+            "http://127.0.0.1:49183/".to_string(),
+        ];
+        assert!(state.select_endpoint("http://127.0.0.1:49182/".to_string()));
+        state.apply_snapshot_result(0, Ok(dummy_snapshot(vec![("山手線", 2), ("中央線", 2)])));
+        state.apply_inspection_result(
+            PathBuf::from("/tmp/yamanote.oud2"),
+            Ok(dummy_inspection("OuDiaSecond.1.04", Some("山手線"), 3)),
+        );
+        assert!(state.select_route("route-0".to_string()));
+        state.apply_candidates_result(Ok(vec![
+            dummy_candidate("cand-1", 0, 0, "PrimaryExact", true, 2),
+            dummy_candidate("cand-2", 0, 1, "Partial", false, 2),
+        ]));
+
+        // 1. 同一候補再選択は維持、別候補選択でクリア
+        assert!(state.set_manual_station_slot(0, 2));
+        assert!(state.select_candidate(CandidateId("cand-1".to_string())));
+        assert!(state.manual_station_mappings.is_some());
+        assert!(state.select_candidate(CandidateId("cand-2".to_string())));
+        assert!(state.manual_station_mappings.is_none());
+
+        // 2. 候補再検索でクリア
+        assert!(state.set_manual_station_slot(0, 2));
+        state.apply_candidates_result(Ok(vec![dummy_candidate(
+            "cand-3",
+            0,
+            2,
+            "PrimaryExact",
+            true,
+            2,
+        )]));
+        assert!(state.manual_station_mappings.is_none());
+
+        // 3. 路線・ダイヤ・種別変更でクリア
+        assert!(state.set_manual_station_slot(0, 2));
+        assert!(state.select_diagram_index(Some(1)));
+        assert!(state.manual_station_mappings.is_none());
+
+        state.apply_candidates_result(Ok(vec![dummy_candidate(
+            "cand-4",
+            1,
+            0,
+            "PrimaryExact",
+            true,
+            2,
+        )]));
+        assert!(state.set_manual_station_slot(0, 2));
+        assert!(state.select_train_type(Some(1)));
+        assert!(state.manual_station_mappings.is_none());
+
+        state.apply_candidates_result(Ok(vec![dummy_candidate(
+            "cand-5",
+            1,
+            1,
+            "PrimaryExact",
+            true,
+            2,
+        )]));
+        assert!(state.set_manual_station_slot(0, 2));
+        assert!(state.select_route("route-1".to_string()));
+        assert!(state.manual_station_mappings.is_none());
+
+        // 4. Step 2 OuDia 再解析・Step 1 スナップショット更新・接続先変更でクリア
+        state.apply_candidates_result(Ok(vec![dummy_candidate(
+            "cand-6",
+            1,
+            2,
+            "PrimaryExact",
+            true,
+            2,
+        )]));
+        assert!(state.set_manual_station_slot(0, 2));
+        state.apply_inspection_result(
+            PathBuf::from("/tmp/chuo.oud2"),
+            Ok(dummy_inspection("OuDiaSecond.1.04", Some("中央線"), 2)),
+        );
+        assert!(state.manual_station_mappings.is_none());
+
+        state.apply_candidates_result(Ok(vec![dummy_candidate(
+            "cand-7",
+            0,
+            0,
+            "PrimaryExact",
+            true,
+            2,
+        )]));
+        assert!(state.set_manual_station_slot(0, 2));
+        state.apply_snapshot_result(1, Ok(dummy_snapshot(vec![("京浜東北線", 2)])));
+        assert!(state.manual_station_mappings.is_none());
+
+        assert!(state.select_route("route-0".to_string()));
+        state.apply_candidates_result(Ok(vec![dummy_candidate(
+            "cand-8",
+            0,
+            0,
+            "PrimaryExact",
+            true,
+            2,
+        )]));
+        assert!(state.set_manual_station_slot(0, 2));
+        assert!(state.select_endpoint("http://127.0.0.1:49183/".to_string()));
+        assert!(state.manual_station_mappings.is_none());
+    }
+
+    #[test]
+    fn station_mapping_issues_detects_missing_and_duplicate_slots() {
+        let snapshot = dummy_detailed_snapshot(
+            vec![(
+                "r1",
+                "山手線",
+                vec![
+                    ("東京", "1", 10_000, Some(120_000)),
+                    ("神田", "2", 10_000, None),
+                ],
+            )],
+            1_000,
+        );
+        let route = &snapshot.routes[0];
+        let template = TemplateDto {
+            diagram_index: 0,
+            direction: "kudari".to_string(),
+            train_index: 0,
+            train_type_index: Some(0),
+            active_station_slots: vec![
+                StationSlotDto {
+                    index: 0,
+                    name: "東京".to_string(),
+                    handling_code: Some(1),
+                    previous_name: None,
+                    next_name: Some("神田".to_string()),
+                },
+                StationSlotDto {
+                    index: 1,
+                    name: "神田".to_string(),
+                    handling_code: Some(1),
+                    previous_name: Some("東京".to_string()),
+                    next_name: None,
+                },
+            ],
+            route_station_slots: Vec::new(),
+        };
+
+        let valid = vec![
+            StationMappingDto {
+                mtr_station_index: 0,
+                oudia_station_slot: 0,
+            },
+            StationMappingDto {
+                mtr_station_index: 1,
+                oudia_station_slot: 1,
+            },
+        ];
+        assert!(station_mapping_issues(route, &template, &valid).is_empty());
+
+        let invalid = vec![
+            StationMappingDto {
+                mtr_station_index: 0,
+                oudia_station_slot: 0,
+            },
+            StationMappingDto {
+                mtr_station_index: 1,
+                oudia_station_slot: 0,
+            },
+        ];
+        let issues = station_mapping_issues(route, &template, &invalid);
+        assert_eq!(issues.len(), 2);
+        assert!(issues.iter().any(|issue| issue.contains("未割当")));
+        assert!(issues.iter().any(|issue| issue.contains("重複割当")));
     }
 }

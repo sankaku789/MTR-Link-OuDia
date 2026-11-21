@@ -2,11 +2,11 @@ use std::ops::Range;
 
 use gpui::{
     App, Application, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler,
-    Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding, Keystroke,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window, WindowBounds,
-    WindowOptions, actions, black, div, fill, hsla, opaque_grey, point, prelude::*, px, relative,
-    rgb, rgba, size, white, yellow,
+    Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, Hsla, KeyBinding,
+    Keystroke, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    Pixels, Point, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle,
+    Window, WindowBounds, WindowOptions, actions, black, div, fill, hsla, opaque_grey, point,
+    prelude::*, px, relative, rgb, rgba, size, white, yellow,
 };
 use unicode_segmentation::*;
 
@@ -30,10 +30,47 @@ actions!(
     ]
 );
 
-struct TextInput {
+/// [`TextInput`] の外観設定。
+#[derive(Clone, Copy)]
+pub struct TextInputStyle {
+    pub bg: Hsla,
+    pub outer_bg: Hsla,
+    pub border_color: Option<Hsla>,
+    pub focus_border_color: Option<Hsla>,
+    pub text_color: Hsla,
+    pub placeholder_color: Hsla,
+    pub cursor_color: Hsla,
+    pub text_size: Pixels,
+    pub line_height: Pixels,
+    pub height: Pixels,
+    pub padding_x: Pixels,
+    pub padding_y: Pixels,
+}
+
+impl Default for TextInputStyle {
+    fn default() -> Self {
+        Self {
+            bg: white().into(),
+            outer_bg: rgb(0xeeeeee).into(),
+            border_color: None,
+            focus_border_color: None,
+            text_color: black().into(),
+            placeholder_color: hsla(0., 0., 0., 0.2),
+            cursor_color: gpui::blue().into(),
+            text_size: px(24.),
+            line_height: px(30.),
+            height: px(30. + 4. * 2.),
+            padding_x: px(4.),
+            padding_y: px(4.),
+        }
+    }
+}
+
+pub struct TextInput {
     focus_handle: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
+    style: TextInputStyle,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -43,6 +80,44 @@ struct TextInput {
 }
 
 impl TextInput {
+    pub fn new(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            content: "".into(),
+            placeholder: placeholder.into(),
+            style: TextInputStyle::default(),
+            selected_range: 0..0,
+            selection_reversed: false,
+            marked_range: None,
+            last_layout: None,
+            last_bounds: None,
+            is_selecting: false,
+        }
+    }
+
+    // src/main.rs では `mod text_input;` として取り込むため未使用メソッド警告を抑止する。
+    #[allow(dead_code)]
+    pub fn with_style(mut self, style: TextInputStyle) -> Self {
+        self.style = style;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn set_style(&mut self, style: TextInputStyle, cx: &mut Context<Self>) {
+        self.style = style;
+        cx.notify();
+    }
+
+    #[allow(dead_code)]
+    pub fn text(&self) -> &str {
+        self.content.as_ref()
+    }
+
+    pub fn clear(&mut self, cx: &mut Context<Self>) {
+        self.reset();
+        cx.notify();
+    }
+
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.move_to(self.previous_boundary(self.cursor_offset()), cx);
@@ -97,9 +172,10 @@ impl TextInput {
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        window.focus(&self.focus_handle);
         self.is_selecting = true;
 
         if event.modifiers.shift {
@@ -444,7 +520,7 @@ impl Element for TextElement {
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), hsla(0., 0., 0., 0.2))
+            (input.placeholder.clone(), input.style.placeholder_color)
         } else {
             (content, style.color)
         };
@@ -485,6 +561,7 @@ impl Element for TextElement {
         };
 
         let font_size = style.font_size.to_pixels(window.rem_size());
+        let cursor_color = input.style.cursor_color;
         let line = window
             .text_system()
             .shape_line(display_text, font_size, &runs, None);
@@ -498,7 +575,7 @@ impl Element for TextElement {
                         point(bounds.left() + cursor_pos, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
                     ),
-                    gpui::blue(),
+                    cursor_color,
                 )),
             )
         } else {
@@ -563,11 +640,35 @@ impl Element for TextElement {
 }
 
 impl Render for TextInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let focus_handle = self.focus_handle(cx);
+        let is_focused = focus_handle.is_focused(window);
+        let border_color = if is_focused {
+            self.style.focus_border_color.or(self.style.border_color)
+        } else {
+            self.style.border_color
+        };
+
+        let mut inner = div()
+            .h(self.style.height)
+            .w_full()
+            .min_w_0()
+            .px(self.style.padding_x)
+            .py(self.style.padding_y)
+            .bg(self.style.bg)
+            .text_color(self.style.text_color)
+            .child(TextElement { input: cx.entity() });
+
+        if let Some(color) = border_color {
+            inner = inner.border_1().border_color(color);
+        }
+
         div()
             .flex()
+            .w_full()
+            .min_w_0()
             .key_context("TextInput")
-            .track_focus(&self.focus_handle(cx))
+            .track_focus(&focus_handle)
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
@@ -586,17 +687,10 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .bg(rgb(0xeeeeee))
-            .line_height(px(30.))
-            .text_size(px(24.))
-            .child(
-                div()
-                    .h(px(30. + 4. * 2.))
-                    .w_full()
-                    .p(px(4.))
-                    .bg(white())
-                    .child(TextElement { input: cx.entity() }),
-            )
+            .bg(self.style.outer_bg)
+            .line_height(self.style.line_height)
+            .text_size(self.style.text_size)
+            .child(inner)
     }
 }
 
@@ -622,7 +716,7 @@ impl InputExample {
     fn on_reset_click(&mut self, _: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         self.recent_keystrokes.clear();
         self.text_input
-            .update(cx, |text_input, _cx| text_input.reset());
+            .update(cx, |text_input, cx| text_input.clear(cx));
         cx.notify();
     }
 }
@@ -674,24 +768,33 @@ impl Render for InputExample {
     }
 }
 
+/// [`TextInput`] 向けのキーバインドを登録する。
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("backspace", Backspace, Some("TextInput")),
+        KeyBinding::new("delete", Delete, Some("TextInput")),
+        KeyBinding::new("left", Left, Some("TextInput")),
+        KeyBinding::new("right", Right, Some("TextInput")),
+        KeyBinding::new("shift-left", SelectLeft, Some("TextInput")),
+        KeyBinding::new("shift-right", SelectRight, Some("TextInput")),
+        KeyBinding::new("cmd-a", SelectAll, Some("TextInput")),
+        KeyBinding::new("ctrl-a", SelectAll, Some("TextInput")),
+        KeyBinding::new("cmd-v", Paste, Some("TextInput")),
+        KeyBinding::new("ctrl-v", Paste, Some("TextInput")),
+        KeyBinding::new("cmd-c", Copy, Some("TextInput")),
+        KeyBinding::new("ctrl-c", Copy, Some("TextInput")),
+        KeyBinding::new("cmd-x", Cut, Some("TextInput")),
+        KeyBinding::new("ctrl-x", Cut, Some("TextInput")),
+        KeyBinding::new("home", Home, Some("TextInput")),
+        KeyBinding::new("end", End, Some("TextInput")),
+        KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("TextInput")),
+    ]);
+}
+
 pub fn run() {
     Application::new().run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(300.0), px(300.0)), cx);
-        cx.bind_keys([
-            KeyBinding::new("backspace", Backspace, None),
-            KeyBinding::new("delete", Delete, None),
-            KeyBinding::new("left", Left, None),
-            KeyBinding::new("right", Right, None),
-            KeyBinding::new("shift-left", SelectLeft, None),
-            KeyBinding::new("shift-right", SelectRight, None),
-            KeyBinding::new("cmd-a", SelectAll, None),
-            KeyBinding::new("cmd-v", Paste, None),
-            KeyBinding::new("cmd-c", Copy, None),
-            KeyBinding::new("cmd-x", Cut, None),
-            KeyBinding::new("home", Home, None),
-            KeyBinding::new("end", End, None),
-            KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, None),
-        ]);
+        bind_keys(cx);
 
         let window = cx
             .open_window(
@@ -700,17 +803,7 @@ pub fn run() {
                     ..Default::default()
                 },
                 |_, cx| {
-                    let text_input = cx.new(|cx| TextInput {
-                        focus_handle: cx.focus_handle(),
-                        content: "".into(),
-                        placeholder: "駅名や列車番号を入力...".into(),
-                        selected_range: 0..0,
-                        selection_reversed: false,
-                        marked_range: None,
-                        last_layout: None,
-                        last_bounds: None,
-                        is_selecting: false,
-                    });
+                    let text_input = cx.new(|cx| TextInput::new("駅名や列車番号を入力...", cx));
                     cx.new(|cx| InputExample {
                         text_input,
                         recent_keystrokes: vec![],
