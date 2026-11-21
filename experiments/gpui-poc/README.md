@@ -15,17 +15,20 @@ cd experiments/gpui-poc
 cargo run
 ```
 
-async bridge の検証（既存 `ReqwestMtrApiClient` を呼ぶ）:
+async bridge と自動検出の検証（既存 `MtrEndpointDiscoveryService` + `ReqwestMtrApiClient` を呼ぶ）:
 
 ```sh
-# Windows (PowerShell)
-$env:MTR_ENDPOINT = "http://127.0.0.1:49182"
+# Windows (PowerShell): 自動検出を使う場合（MTR_ENDPOINT 不要）
 $env:MTR_DIMENSION = "0"   # 省略可
+cargo run --bin fetch_poc
+
+# 接続先を手動で上書きする場合
+$env:MTR_ENDPOINT = "http://127.0.0.1:49182"
 cargo run --bin fetch_poc
 ```
 
-`MTR_ENDPOINT` は MTR API のリッスンポート。MTR-Link-OuDia 本体の Step 1 で
-検出された接続先を使う。
+- 画面の「自動検出」ボタンで Minecraft ログ（`MTR_OUDIA_MINECRAFT_LOG`・`%APPDATA%\.minecraft\logs\latest.log`・実行中 Minecraft の `--gameDir`）およびローカル待受ポートから MTR API を探索します。
+- `MTR_ENDPOINT` は初期接続先の手動上書き用です（未設定のまま「取得」を押した場合も自動検出を試みます）。
 
 ## 評価したいこと
 
