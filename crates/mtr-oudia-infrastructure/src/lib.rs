@@ -246,7 +246,7 @@ fn running_minecraft_log_paths() -> Vec<PathBuf> {
             Some((modified, path))
         })
         .collect::<Vec<_>>();
-    paths.sort_by(|left, right| right.0.cmp(&left.0));
+    paths.sort_by_key(|left| std::cmp::Reverse(left.0));
     paths.dedup_by(|left, right| left.1 == right.1);
     paths.into_iter().map(|(_, path)| path).collect()
 }

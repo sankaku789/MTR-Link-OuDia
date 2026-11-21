@@ -6384,14 +6384,17 @@ mod tests {
             "sha-1",
         )));
 
-        // 同一スロットの再設定は no-op として扱い下流をクリアしない
-        assert!(!state.set_manual_station_slot(0, 0));
-        assert!(state.manual_station_mappings.is_none());
-        assert!(state.preview.is_some());
-        assert!(state.save_receipt.is_some());
-
-        // 別スロットへ変更すると手動マッピングが保持され、Step 4/5 がクリアされる
+        // 別スロットを追加すると 1 対多で手動マッピングが保持され、Step 4/5 がクリアされる
         assert!(state.set_manual_station_slot(0, 2));
+        assert_eq!(
+            mapping_pairs(state.manual_station_mappings.as_deref()),
+            vec![(0, 0), (0, 2), (1, 1)]
+        );
+        assert!(state.preview.is_none());
+        assert!(state.save_receipt.is_none());
+
+        // 割当済みスロットを再指定するとトグル解除される
+        assert!(state.set_manual_station_slot(0, 0));
         assert_eq!(
             mapping_pairs(state.manual_station_mappings.as_deref()),
             vec![(0, 2), (1, 1)]
@@ -6400,8 +6403,6 @@ mod tests {
             mapping_pairs(state.effective_station_mappings()),
             vec![(0, 2), (1, 1)]
         );
-        assert!(state.preview.is_none());
-        assert!(state.save_receipt.is_none());
 
         // Step 4/5 を再度埋めた後、「自動マッピングに戻す」で手動編集と下流がクリアされる
         state.apply_preview_result(Ok(dummy_preview("preview-2", 2, false, false, Vec::new())));
