@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, Div, FontWeight, IntoElement, ParentElement,
-    Render, Rgba, ScrollHandle, ScrollWheelEvent, SharedString, Styled, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, size,
+    Render, Rgba, ScrollHandle, ScrollWheelEvent, SharedString, Styled, Subscription, Window,
+    WindowAppearance, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
 use gpui_poc::backend::{AppBackend, format_business_error};
 use gpui_poc::carbon::{
@@ -366,17 +366,52 @@ pub fn status_notification(status: &AppStatus) -> (NotificationKind, String, Str
     }
 }
 
-fn theme_badge_label(kind: CarbonThemeKind) -> &'static str {
-    match kind {
-        CarbonThemeKind::Gray100 => "Gray 100",
-        CarbonThemeKind::Gray10 => "Gray 10",
+/// アプリケーションのテーマ設定モード。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemePreference {
+    /// OS の外観設定に自動で追従する。
+    #[default]
+    System,
+    /// ライトモードに固定する。
+    Light,
+    /// ダークモードに固定する。
+    Dark,
+}
+
+fn is_dark_appearance(appearance: WindowAppearance) -> bool {
+    matches!(
+        appearance,
+        WindowAppearance::Dark | WindowAppearance::VibrantDark
+    )
+}
+
+fn resolve_theme_kind(preference: ThemePreference, os_dark: bool) -> CarbonThemeKind {
+    match preference {
+        ThemePreference::System => {
+            if os_dark {
+                CarbonThemeKind::Gray100
+            } else {
+                CarbonThemeKind::Gray10
+            }
+        }
+        ThemePreference::Light => CarbonThemeKind::Gray10,
+        ThemePreference::Dark => CarbonThemeKind::Gray100,
     }
 }
 
-fn theme_toggle_label(kind: CarbonThemeKind) -> &'static str {
+fn theme_badge_label(preference: ThemePreference, kind: CarbonThemeKind) -> &'static str {
+    match (preference, kind) {
+        (ThemePreference::System, CarbonThemeKind::Gray100) => "OS 連動・ダーク",
+        (ThemePreference::System, CarbonThemeKind::Gray10) => "OS 連動・ライト",
+        (ThemePreference::Dark, _) | (_, CarbonThemeKind::Gray100) => "ダーク",
+        (ThemePreference::Light, _) => "ライト",
+    }
+}
+
+fn dark_mode_button_label(kind: CarbonThemeKind) -> &'static str {
     match kind {
-        CarbonThemeKind::Gray100 => "Gray 10 に切替",
-        CarbonThemeKind::Gray10 => "Gray 100 に切替",
+        CarbonThemeKind::Gray100 => "ダークモード: ON",
+        CarbonThemeKind::Gray10 => "ダークモード: OFF",
     }
 }
 
@@ -520,6 +555,8 @@ pub fn step_for_scroll_position(top_item: usize, offset_y: f32, max_offset_heigh
 
 /// UI から独立してテスト可能なアプリケーション状態。
 struct MtrShellState {
+    theme_preference: ThemePreference,
+    os_dark: bool,
     theme: CarbonTheme,
     current_step: AppStep,
     candidates: Vec<String>,
@@ -547,8 +584,12 @@ impl MtrShellState {
                 detail,
             },
         };
+        let theme_preference = ThemePreference::default();
+        let os_dark = true;
         Self {
-            theme: CarbonTheme::default(),
+            theme_preference,
+            os_dark,
+            theme: CarbonTheme::from_kind(resolve_theme_kind(theme_preference, os_dark)),
             current_step: AppStep::Step1Mtr,
             candidates: Vec::new(),
             selected_endpoint: None,
@@ -565,6 +606,29 @@ impl MtrShellState {
             save_receipt: None,
             status,
         }
+    }
+
+    fn sync_theme(&mut self) {
+        self.theme =
+            CarbonTheme::from_kind(resolve_theme_kind(self.theme_preference, self.os_dark));
+    }
+
+    fn set_os_dark(&mut self, os_dark: bool) {
+        self.os_dark = os_dark;
+        self.sync_theme();
+    }
+
+    fn set_theme_preference(&mut self, preference: ThemePreference) {
+        self.theme_preference = preference;
+        self.sync_theme();
+    }
+
+    fn toggle_dark_mode(&mut self) {
+        let next = match self.theme.kind {
+            CarbonThemeKind::Gray100 => ThemePreference::Light,
+            CarbonThemeKind::Gray10 => ThemePreference::Dark,
+        };
+        self.set_theme_preference(next);
     }
 
     fn is_step_completed(&self, step: AppStep) -> bool {
@@ -822,28 +886,44 @@ struct MtrApp {
     state: MtrShellState,
     steps_scroll_handle: ScrollHandle,
     sync_step_from_scroll: bool,
+    _appearance_subscription: Subscription,
 }
 
 impl MtrApp {
-    fn new() -> Self {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let os_dark = is_dark_appearance(window.appearance());
+        let appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
+            this.state
+                .set_os_dark(is_dark_appearance(window.appearance()));
+            cx.notify();
+        });
+
         match AppBackend::new() {
             Ok(backend) => {
                 let session_id = backend.create_session();
+                let mut state = MtrShellState::new(Ok(()));
+                state.set_os_dark(os_dark);
                 Self {
                     backend: Some(backend),
                     session_id: Some(session_id),
-                    state: MtrShellState::new(Ok(())),
+                    state,
                     steps_scroll_handle: ScrollHandle::new(),
                     sync_step_from_scroll: false,
+                    _appearance_subscription: appearance_subscription,
                 }
             }
-            Err(err) => Self {
-                backend: None,
-                session_id: None,
-                state: MtrShellState::new(Err(err)),
-                steps_scroll_handle: ScrollHandle::new(),
-                sync_step_from_scroll: false,
-            },
+            Err(err) => {
+                let mut state = MtrShellState::new(Err(err));
+                state.set_os_dark(os_dark);
+                Self {
+                    backend: None,
+                    session_id: None,
+                    state,
+                    steps_scroll_handle: ScrollHandle::new(),
+                    sync_step_from_scroll: false,
+                    _appearance_subscription: appearance_subscription,
+                }
+            }
         }
     }
 
@@ -1203,22 +1283,51 @@ impl MtrApp {
                             .child("MTR-Link-OuDia"),
                     )
                     .child(carbon_tag(
-                        theme_badge_label(theme.kind),
+                        theme_badge_label(self.state.theme_preference, theme.kind),
                         TagKind::CoolGray,
                         theme,
                     )),
             )
-            .child(carbon_button(
-                "toggle-theme",
-                theme_toggle_label(theme.kind),
-                ButtonKind::Ghost,
-                false,
-                theme,
-                cx.listener(|this, _: &ClickEvent, _window, cx| {
-                    this.state.theme.toggle();
-                    cx.notify();
-                }),
-            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .flex_shrink_0()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                    .child(carbon_button(
+                        "toggle-dark-mode",
+                        dark_mode_button_label(theme.kind),
+                        if self.state.theme_preference == ThemePreference::System {
+                            ButtonKind::Ghost
+                        } else {
+                            ButtonKind::Secondary
+                        },
+                        false,
+                        theme,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.state.toggle_dark_mode();
+                            cx.notify();
+                        }),
+                    ))
+                    .child(carbon_button(
+                        "follow-os-theme",
+                        "OS に合わせる",
+                        if self.state.theme_preference == ThemePreference::System {
+                            ButtonKind::Secondary
+                        } else {
+                            ButtonKind::Ghost
+                        },
+                        false,
+                        theme,
+                        cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.state
+                                .set_os_dark(is_dark_appearance(window.appearance()));
+                            this.state.set_theme_preference(ThemePreference::System);
+                            cx.notify();
+                        }),
+                    )),
+            )
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
@@ -3046,7 +3155,7 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| MtrApp::new()),
+            |window, cx| cx.new(|cx| MtrApp::new(window, cx)),
         )
         .unwrap();
         cx.activate(true);
@@ -4137,5 +4246,61 @@ mod tests {
         // max_offset_height が 0（スクロール不要）のときは top_item を尊重する。
         assert_eq!(step_for_scroll_position(1, 0.0, 0.0), AppStep::Step2Oudia);
         assert_eq!(step_for_scroll_position(99, 0.0, 500.0), AppStep::Step1Mtr);
+    }
+
+    #[test]
+    fn theme_preference_supports_dark_mode_toggle_and_os_sync() {
+        assert!(is_dark_appearance(WindowAppearance::Dark));
+        assert!(is_dark_appearance(WindowAppearance::VibrantDark));
+        assert!(!is_dark_appearance(WindowAppearance::Light));
+        assert!(!is_dark_appearance(WindowAppearance::VibrantLight));
+
+        let mut state = MtrShellState::new(Ok(()));
+        assert_eq!(state.theme_preference, ThemePreference::System);
+
+        // OS に合わせるモードでは OS 側の変更に追従する。
+        state.set_os_dark(false);
+        assert_eq!(state.theme.kind, CarbonThemeKind::Gray10);
+        assert_eq!(
+            theme_badge_label(state.theme_preference, state.theme.kind),
+            "OS 連動・ライト"
+        );
+        assert_eq!(
+            dark_mode_button_label(state.theme.kind),
+            "ダークモード: OFF"
+        );
+
+        state.set_os_dark(true);
+        assert_eq!(state.theme.kind, CarbonThemeKind::Gray100);
+        assert_eq!(
+            theme_badge_label(state.theme_preference, state.theme.kind),
+            "OS 連動・ダーク"
+        );
+        assert_eq!(dark_mode_button_label(state.theme.kind), "ダークモード: ON");
+
+        // ダークモード ON/OFF を押すと手動モードに切り替わり、OS 変更に上書きされない。
+        state.toggle_dark_mode();
+        assert_eq!(state.theme_preference, ThemePreference::Light);
+        assert_eq!(state.theme.kind, CarbonThemeKind::Gray10);
+        assert_eq!(
+            theme_badge_label(state.theme_preference, state.theme.kind),
+            "ライト"
+        );
+
+        state.set_os_dark(true);
+        assert_eq!(state.theme.kind, CarbonThemeKind::Gray10);
+
+        state.toggle_dark_mode();
+        assert_eq!(state.theme_preference, ThemePreference::Dark);
+        assert_eq!(state.theme.kind, CarbonThemeKind::Gray100);
+        assert_eq!(
+            theme_badge_label(state.theme_preference, state.theme.kind),
+            "ダーク"
+        );
+
+        // 「OS に合わせる」に戻すと現在の OS 設定を反映する。
+        state.set_os_dark(false);
+        state.set_theme_preference(ThemePreference::System);
+        assert_eq!(state.theme.kind, CarbonThemeKind::Gray10);
     }
 }
