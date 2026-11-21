@@ -3045,11 +3045,12 @@ impl MtrApp {
         section.child(step_header).child(body)
     }
 
-    fn render_main(&self, cx: &mut Context<Self>) -> Div {
+    fn render_main(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let theme = &self.state.theme;
         let (notif_kind, notif_title, notif_subtitle) = status_notification(&self.state.status);
         let notification =
             carbon_inline_notification(notif_kind, notif_title, notif_subtitle, theme);
+        let bottom_spacer = (f32::from(window.viewport_size().height) - 180.0).max(320.0);
 
         let mut steps_scroll = div()
             .id("main-steps")
@@ -3065,7 +3066,7 @@ impl MtrApp {
             .flex_col()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_06))
             .pr(CarbonSpacing::px(CarbonSpacing::SP_02))
-            .pb(CarbonSpacing::px(CarbonSpacing::SP_07));
+            .pb(px(bottom_spacer));
 
         for step in AppStep::ALL {
             steps_scroll = steps_scroll.child(self.render_step_section(step, cx));
@@ -3085,7 +3086,7 @@ impl MtrApp {
 }
 
 impl Render for MtrApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.sync_step_from_scroll {
             let offset_y = f32::from(self.steps_scroll_handle.offset().y);
             let max_offset_height = f32::from(self.steps_scroll_handle.max_offset().height);
@@ -3112,7 +3113,7 @@ impl Render for MtrApp {
                     .flex()
                     .flex_row()
                     .child(self.render_sidebar(cx))
-                    .child(self.render_main(cx)),
+                    .child(self.render_main(window, cx)),
             )
     }
 }
