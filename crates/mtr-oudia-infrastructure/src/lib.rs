@@ -92,10 +92,10 @@ impl OudiaRepository for FileOudiaRepository {
         location: &std::path::Path,
     ) -> Result<mtr_oudia_domain::OudiaSource, BusinessError> {
         let bytes = std::fs::read(location).map_err(io_business_error)?;
-        mtr_oudia_domain::parse_oudia(bytes).map_err(|error| {
+        mtr_oudia_domain::parse_oudia(bytes).map_err(|_error| {
             #[cfg(debug_assertions)]
             eprintln!(
-                "[OuDia] 解析失敗: path={}, error={error:?}",
+                "[OuDia] 解析失敗: path={}, error={_error:?}",
                 location.display()
             );
             BusinessError {
@@ -367,8 +367,8 @@ async fn probe_endpoint(
 ) -> Result<(), ApplicationError> {
     let (_, body) = fetch_response(client, endpoint, dimension).await?;
     let result = parse_mtr_probe(&body);
-    if let Err(ApplicationError::InvalidResponse { reason }) = &result {
-        debug_mtr_api!("MTR形式のJSONではありません: {reason}");
+    if let Err(ApplicationError::InvalidResponse { reason: _reason }) = &result {
+        debug_mtr_api!("MTR形式のJSONではありません: {_reason}");
     }
     result
 }
@@ -385,8 +385,8 @@ async fn fetch_snapshot(
         });
     }
     let result = parse_mtr_response(&body, endpoint, dimension, current_unix_millis()?);
-    if let Err(ApplicationError::InvalidResponse { reason }) = &result {
-        debug_mtr_api!("JSON解析で失敗したフィールド: {reason}");
+    if let Err(ApplicationError::InvalidResponse { reason: _reason }) = &result {
+        debug_mtr_api!("JSON解析で失敗したフィールド: {_reason}");
     }
     result
 }
