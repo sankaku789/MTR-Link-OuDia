@@ -642,7 +642,7 @@ fn save_button_label(saving: bool) -> &'static str {
     if saving {
         "保存中..."
     } else {
-        "保存先を選んで保存"
+        "上書き保存"
     }
 }
 
@@ -1977,6 +1977,29 @@ impl MtrApp {
             .ok();
         })
         .detach();
+    }
+
+    fn start_overwrite_save(&mut self, cx: &mut Context<Self>) {
+        if self.state.status.is_busy() || self.state.status.is_init_failed() {
+            return;
+        }
+        let Some(preview_id) = self.state.preview.as_ref().map(|p| p.id.clone()) else {
+            self.state.status = AppStatus::SaveError {
+                title: "プレビューが未生成です".to_string(),
+                detail: "Step 4 で時刻表プレビューを生成してから保存してください。".to_string(),
+            };
+            cx.notify();
+            return;
+        };
+        let Some(oudia_path) = self.state.oudia_path.clone() else {
+            self.state.status = AppStatus::SaveError {
+                title: "元の OuDia ファイルが未選択です".to_string(),
+                detail: "Step 2 で OuDia ファイルを読み込んでから保存してください。".to_string(),
+            };
+            cx.notify();
+            return;
+        };
+        self.start_save(preview_id, oudia_path, cx);
     }
 
     fn start_select_save_path(&mut self, cx: &mut Context<Self>) {
@@ -4548,16 +4571,38 @@ impl MtrApp {
                                 theme,
                             )),
                     )
-                    .child(carbon_button(
-                        "select-save-path",
-                        save_button_label(saving),
-                        ButtonKind::Primary,
-                        disabled,
-                        theme,
-                        cx.listener(|this, _: &ClickEvent, _window, cx| {
-                            this.start_select_save_path(cx);
-                        }),
-                    )),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                            .child(carbon_button(
+                                "select-save-path",
+                                if saving {
+                                    "保存中..."
+                                } else {
+                                    "別名で保存..."
+                                },
+                                ButtonKind::Secondary,
+                                disabled,
+                                theme,
+                                cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                    this.start_select_save_path(cx);
+                                }),
+                            ))
+                            .child(carbon_button(
+                                "overwrite-save",
+                                save_button_label(saving),
+                                ButtonKind::Primary,
+                                disabled || self.state.oudia_path.is_none(),
+                                theme,
+                                cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                    this.start_overwrite_save(cx);
+                                }),
+                            )),
+                    ),
             );
 
         let result_tile = if let Some(receipt) = &self.state.save_receipt {
