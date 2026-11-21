@@ -1,0 +1,520 @@
+use gpui::{
+    App, ClickEvent, Div, ElementId, FontWeight, InteractiveElement, ParentElement, Rgba,
+    SharedString, Stateful, StatefulInteractiveElement, Styled, Window, div, px, rgb,
+};
+
+use super::tokens::{CarbonSpacing, CarbonTheme, CarbonThemeKind, CarbonTypography};
+
+const TRANSPARENT: Rgba = Rgba {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 0.0,
+};
+
+/// Carbon Design System v11 のボタン種別。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ButtonKind {
+    Primary,
+    Secondary,
+    Ghost,
+}
+
+/// [`resolve_button_style`] が返すボタンの解決済みスタイル色。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ButtonStyle {
+    pub bg: Rgba,
+    pub hover_bg: Rgba,
+    pub active_bg: Rgba,
+    pub text: Rgba,
+}
+
+/// テーマ・ボタン種別・無効状態からボタンの配色を解決する。
+pub fn resolve_button_style(theme: &CarbonTheme, kind: ButtonKind, disabled: bool) -> ButtonStyle {
+    let c = &theme.colors;
+
+    if disabled {
+        return match kind {
+            ButtonKind::Primary | ButtonKind::Secondary => ButtonStyle {
+                bg: c.button_disabled,
+                hover_bg: c.button_disabled,
+                active_bg: c.button_disabled,
+                text: c.text_on_color_disabled,
+            },
+            ButtonKind::Ghost => ButtonStyle {
+                bg: TRANSPARENT,
+                hover_bg: TRANSPARENT,
+                active_bg: TRANSPARENT,
+                text: c.text_disabled,
+            },
+        };
+    }
+
+    match kind {
+        ButtonKind::Primary => ButtonStyle {
+            bg: c.button_primary,
+            hover_bg: c.button_primary_hover,
+            active_bg: c.button_primary_active,
+            text: c.text_on_color,
+        },
+        ButtonKind::Secondary => ButtonStyle {
+            bg: c.button_secondary,
+            hover_bg: c.button_secondary_hover,
+            active_bg: c.button_secondary_active,
+            text: c.text_on_color,
+        },
+        ButtonKind::Ghost => {
+            // Carbon v11 の Ghost ボタンは透明背景に link-primary 文字色、
+            // ホバー・アクティブ時は背景トーンを重ねる。
+            let (active_bg, text) = match theme.kind {
+                CarbonThemeKind::Gray100 => (c.layer_02, rgb(0x78a9ff)),
+                CarbonThemeKind::Gray10 => (c.border_subtle, rgb(0x0f62fe)),
+            };
+            ButtonStyle {
+                bg: TRANSPARENT,
+                hover_bg: c.layer_hover_01,
+                active_bg,
+                text,
+            }
+        }
+    }
+}
+
+/// Carbon Design System v11 ベースのボタン要素 (`md` 高さ 40px, 角丸なし) を生成する。
+///
+/// `disabled == true` の場合は `on_click` を登録せず、クリック抑止を保証する。
+/// （PoC 用の簡略実装として、フォーカスリングやアイコン予約余白は省略している。）
+pub fn carbon_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    kind: ButtonKind,
+    disabled: bool,
+    theme: &CarbonTheme,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Stateful<Div> {
+    let style = resolve_button_style(theme, kind, disabled);
+
+    let base = div()
+        .id(id.into())
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .h(px(40.0))
+        .px(CarbonSpacing::px(CarbonSpacing::SP_05))
+        .rounded_none()
+        .bg(style.bg)
+        .text_color(style.text)
+        .text_size(CarbonTypography::BODY_COMPACT_01.font_size_px())
+        .line_height(CarbonTypography::BODY_COMPACT_01.line_height_px())
+        .whitespace_nowrap()
+        .child(label.into());
+
+    if disabled {
+        base.cursor_not_allowed()
+    } else {
+        base.cursor_pointer()
+            .hover(move |s| s.bg(style.hover_bg))
+            .active(move |s| s.bg(style.active_bg))
+            .on_click(on_click)
+    }
+}
+
+/// Carbon Design System v11 の Tile レイヤー種別。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TileLayer {
+    Layer01,
+    Layer02,
+}
+
+/// Tile レイヤーに対応する背景色を解決する。
+pub fn resolve_tile_bg(theme: &CarbonTheme, layer: TileLayer) -> Rgba {
+    match layer {
+        TileLayer::Layer01 => theme.colors.layer_01,
+        TileLayer::Layer02 => theme.colors.layer_02,
+    }
+}
+
+/// Carbon Design System v11 準拠のフラットなサーフェスコンテナ (`Tile`) を生成する。
+pub fn carbon_tile(layer: TileLayer, theme: &CarbonTheme) -> Div {
+    let bg = resolve_tile_bg(theme, layer);
+
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .min_w_0()
+        .rounded_none()
+        .bg(bg)
+        .border_1()
+        .border_color(theme.colors.border_subtle)
+        .p(CarbonSpacing::px(CarbonSpacing::SP_05))
+        .text_color(theme.colors.text_primary)
+}
+
+/// Carbon Design System v11 の Tag 種別。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TagKind {
+    Blue,
+    Green,
+    Red,
+    WarmGray,
+    CoolGray,
+}
+
+/// [`resolve_tag_style`] が返す Tag の解決済みスタイル色。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TagStyle {
+    pub bg: Rgba,
+    pub text: Rgba,
+}
+
+/// Carbon v11 の Tag 専用配色（`support_*` とは独立した 20/70・70/20 トーン）を解決する。
+pub fn resolve_tag_style(theme: &CarbonTheme, kind: TagKind) -> TagStyle {
+    match (theme.kind, kind) {
+        (CarbonThemeKind::Gray100, TagKind::Blue) => TagStyle {
+            bg: rgb(0x0043ce),
+            text: rgb(0xd0e2ff),
+        },
+        (CarbonThemeKind::Gray100, TagKind::Green) => TagStyle {
+            bg: rgb(0x0e6027),
+            text: rgb(0xa7f0ba),
+        },
+        (CarbonThemeKind::Gray100, TagKind::Red) => TagStyle {
+            bg: rgb(0xa2191f),
+            text: rgb(0xffd7d9),
+        },
+        (CarbonThemeKind::Gray100, TagKind::WarmGray) => TagStyle {
+            bg: rgb(0x565151),
+            text: rgb(0xe5e0df),
+        },
+        (CarbonThemeKind::Gray100, TagKind::CoolGray) => TagStyle {
+            bg: rgb(0x4d5358),
+            text: rgb(0xdde1e6),
+        },
+        (CarbonThemeKind::Gray10, TagKind::Blue) => TagStyle {
+            bg: rgb(0xd0e2ff),
+            text: rgb(0x0043ce),
+        },
+        (CarbonThemeKind::Gray10, TagKind::Green) => TagStyle {
+            bg: rgb(0xa7f0ba),
+            text: rgb(0x0e6027),
+        },
+        (CarbonThemeKind::Gray10, TagKind::Red) => TagStyle {
+            bg: rgb(0xffd7d9),
+            text: rgb(0xa2191f),
+        },
+        (CarbonThemeKind::Gray10, TagKind::WarmGray) => TagStyle {
+            bg: rgb(0xe5e0df),
+            text: rgb(0x3c3838),
+        },
+        (CarbonThemeKind::Gray10, TagKind::CoolGray) => TagStyle {
+            bg: rgb(0xdde1e6),
+            text: rgb(0x343a3f),
+        },
+    }
+}
+
+/// Carbon Design System v11 ベースのピル型 Tag 要素 (標準高さ 24px, 最小幅 32px) を生成する。
+pub fn carbon_tag(label: impl Into<SharedString>, kind: TagKind, theme: &CarbonTheme) -> Div {
+    let style = resolve_tag_style(theme, kind);
+
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .h(px(24.0))
+        .min_w(px(32.0))
+        .rounded_full()
+        .px(CarbonSpacing::px(CarbonSpacing::SP_03))
+        .bg(style.bg)
+        .text_color(style.text)
+        .text_size(CarbonTypography::LABEL_01.font_size_px())
+        .line_height(CarbonTypography::LABEL_01.line_height_px())
+        .whitespace_nowrap()
+        .child(label.into())
+}
+
+/// Carbon Design System v11 の InlineNotification 種別。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NotificationKind {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+/// [`resolve_notification_style`] が返す通知の解決済みスタイル色。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NotificationStyle {
+    pub accent: Rgba,
+    pub bg: Rgba,
+    pub border: Rgba,
+    pub title_text: Rgba,
+    pub subtitle_text: Rgba,
+}
+
+/// テーマと通知種別から InlineNotification の配色を解決する。
+pub fn resolve_notification_style(
+    theme: &CarbonTheme,
+    kind: NotificationKind,
+) -> NotificationStyle {
+    let c = &theme.colors;
+    let accent = match kind {
+        NotificationKind::Info => c.support_info,
+        NotificationKind::Success => c.support_success,
+        NotificationKind::Warning => c.support_warning,
+        NotificationKind::Error => c.support_error,
+    };
+
+    NotificationStyle {
+        accent,
+        bg: c.layer_01,
+        border: c.border_subtle,
+        title_text: c.text_primary,
+        subtitle_text: c.text_secondary,
+    }
+}
+
+/// Carbon Design System v11 ベースの InlineNotification 要素 (最小高さ 48px) を生成する。
+///
+/// 左側に 3px の `support_*` アクセントボーダーを持ち、残りの 3 辺は `border_subtle` で囲む。
+/// 色のみに依存しないよう種別インジケーターを先頭に表示する（PoC 用の簡略実装）。
+pub fn carbon_inline_notification(
+    kind: NotificationKind,
+    title: impl Into<SharedString>,
+    subtitle: impl Into<SharedString>,
+    theme: &CarbonTheme,
+) -> Div {
+    let style = resolve_notification_style(theme, kind);
+    let subtitle: SharedString = subtitle.into();
+    let badge = match kind {
+        NotificationKind::Info => "[i]",
+        NotificationKind::Success => "[OK]",
+        NotificationKind::Warning => "[!]",
+        NotificationKind::Error => "[X]",
+    };
+
+    let mut content = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .min_h(px(48.0))
+        .gap(CarbonSpacing::px(CarbonSpacing::SP_01))
+        .px(CarbonSpacing::px(CarbonSpacing::SP_05))
+        .py(CarbonSpacing::px(CarbonSpacing::SP_04))
+        .border_t_1()
+        .border_r_1()
+        .border_b_1()
+        .border_color(style.border)
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .min_w_0()
+                .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .font_weight(FontWeight::BOLD)
+                        .text_size(CarbonTypography::LABEL_01.font_size_px())
+                        .line_height(CarbonTypography::LABEL_01.line_height_px())
+                        .text_color(style.accent)
+                        .child(badge),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(CarbonTypography::HEADING_COMPACT_01.font_size_px())
+                        .line_height(CarbonTypography::HEADING_COMPACT_01.line_height_px())
+                        .text_color(style.title_text)
+                        .child(title.into()),
+                ),
+        );
+
+    if !subtitle.is_empty() {
+        content = content.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .text_size(CarbonTypography::BODY_COMPACT_01.font_size_px())
+                .line_height(CarbonTypography::BODY_COMPACT_01.line_height_px())
+                .text_color(style.subtitle_text)
+                .child(subtitle),
+        );
+    }
+
+    div()
+        .flex()
+        .flex_row()
+        .w_full()
+        .min_w_0()
+        .rounded_none()
+        .bg(style.bg)
+        .border_l_3()
+        .border_color(style.accent)
+        .child(content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_BUTTON_KINDS: [ButtonKind; 3] = [
+        ButtonKind::Primary,
+        ButtonKind::Secondary,
+        ButtonKind::Ghost,
+    ];
+    const ALL_TAG_KINDS: [TagKind; 5] = [
+        TagKind::Blue,
+        TagKind::Green,
+        TagKind::Red,
+        TagKind::WarmGray,
+        TagKind::CoolGray,
+    ];
+    const ALL_NOTIFICATION_KINDS: [NotificationKind; 4] = [
+        NotificationKind::Info,
+        NotificationKind::Success,
+        NotificationKind::Warning,
+        NotificationKind::Error,
+    ];
+    const ALL_THEME_KINDS: [CarbonThemeKind; 2] =
+        [CarbonThemeKind::Gray100, CarbonThemeKind::Gray10];
+
+    #[test]
+    fn button_style_resolves_all_kinds_states_and_themes() {
+        for theme_kind in ALL_THEME_KINDS {
+            let theme = CarbonTheme::from_kind(theme_kind);
+            let c = &theme.colors;
+
+            let primary_enabled = resolve_button_style(&theme, ButtonKind::Primary, false);
+            assert_eq!(primary_enabled.bg, c.button_primary);
+            assert_eq!(primary_enabled.hover_bg, c.button_primary_hover);
+            assert_eq!(primary_enabled.active_bg, c.button_primary_active);
+            assert_eq!(primary_enabled.text, c.text_on_color);
+            assert_ne!(primary_enabled.bg, primary_enabled.text);
+
+            let secondary_enabled = resolve_button_style(&theme, ButtonKind::Secondary, false);
+            assert_eq!(secondary_enabled.bg, c.button_secondary);
+            assert_eq!(secondary_enabled.hover_bg, c.button_secondary_hover);
+            assert_eq!(secondary_enabled.active_bg, c.button_secondary_active);
+            assert_eq!(secondary_enabled.text, c.text_on_color);
+            assert_ne!(secondary_enabled.bg, secondary_enabled.text);
+
+            let ghost_enabled = resolve_button_style(&theme, ButtonKind::Ghost, false);
+            assert_eq!(ghost_enabled.bg.a, 0.0);
+            assert_eq!(ghost_enabled.hover_bg, c.layer_hover_01);
+            assert_ne!(ghost_enabled.bg, ghost_enabled.text);
+            assert_ne!(ghost_enabled.hover_bg, ghost_enabled.text);
+            assert_ne!(ghost_enabled.active_bg, ghost_enabled.text);
+
+            for kind in ALL_BUTTON_KINDS {
+                let disabled_style = resolve_button_style(&theme, kind, true);
+                assert_ne!(
+                    disabled_style.bg, disabled_style.text,
+                    "disabled button bg and text must differ for {kind:?} in {theme_kind:?}"
+                );
+                assert_eq!(disabled_style.bg, disabled_style.hover_bg);
+                assert_eq!(disabled_style.bg, disabled_style.active_bg);
+
+                match kind {
+                    ButtonKind::Primary | ButtonKind::Secondary => {
+                        assert_eq!(disabled_style.bg, c.button_disabled);
+                        assert_eq!(disabled_style.text, c.text_on_color_disabled);
+                    }
+                    ButtonKind::Ghost => {
+                        assert_eq!(disabled_style.bg.a, 0.0);
+                        assert_eq!(disabled_style.text, c.text_disabled);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tile_bg_resolves_layer_01_and_layer_02() {
+        for theme_kind in ALL_THEME_KINDS {
+            let theme = CarbonTheme::from_kind(theme_kind);
+            assert_eq!(
+                resolve_tile_bg(&theme, TileLayer::Layer01),
+                theme.colors.layer_01
+            );
+            assert_eq!(
+                resolve_tile_bg(&theme, TileLayer::Layer02),
+                theme.colors.layer_02
+            );
+            assert_ne!(
+                resolve_tile_bg(&theme, TileLayer::Layer01),
+                resolve_tile_bg(&theme, TileLayer::Layer02)
+            );
+        }
+    }
+
+    #[test]
+    fn tag_style_has_distinct_bg_and_text_without_reusing_support_tokens() {
+        for theme_kind in ALL_THEME_KINDS {
+            let theme = CarbonTheme::from_kind(theme_kind);
+            let c = &theme.colors;
+            let support_colors = [
+                c.support_info,
+                c.support_success,
+                c.support_warning,
+                c.support_error,
+            ];
+
+            for kind in ALL_TAG_KINDS {
+                let style = resolve_tag_style(&theme, kind);
+                assert_ne!(
+                    style.bg, style.text,
+                    "tag bg and text must differ for {kind:?} in {theme_kind:?}"
+                );
+                assert!(
+                    !support_colors.contains(&style.bg),
+                    "tag bg must not reuse support_* tokens for {kind:?} in {theme_kind:?}"
+                );
+            }
+        }
+
+        let dark = CarbonTheme::from_kind(CarbonThemeKind::Gray100);
+        assert_eq!(
+            resolve_tag_style(&dark, TagKind::WarmGray).text,
+            rgb(0xe5e0df)
+        );
+        assert_eq!(
+            resolve_tag_style(&dark, TagKind::CoolGray).text,
+            rgb(0xdde1e6)
+        );
+    }
+
+    #[test]
+    fn notification_style_resolves_support_accents_and_surface_colors() {
+        for theme_kind in ALL_THEME_KINDS {
+            let theme = CarbonTheme::from_kind(theme_kind);
+            let c = &theme.colors;
+
+            for kind in ALL_NOTIFICATION_KINDS {
+                let style = resolve_notification_style(&theme, kind);
+                let expected_accent = match kind {
+                    NotificationKind::Info => c.support_info,
+                    NotificationKind::Success => c.support_success,
+                    NotificationKind::Warning => c.support_warning,
+                    NotificationKind::Error => c.support_error,
+                };
+
+                assert_eq!(style.accent, expected_accent);
+                assert_eq!(style.bg, c.layer_01);
+                assert_eq!(style.border, c.border_subtle);
+                assert_eq!(style.title_text, c.text_primary);
+                assert_eq!(style.subtitle_text, c.text_secondary);
+                assert_ne!(style.bg, style.title_text);
+                assert_ne!(style.bg, style.subtitle_text);
+            }
+        }
+    }
+}
