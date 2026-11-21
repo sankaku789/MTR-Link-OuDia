@@ -13,7 +13,7 @@ use futures::{
 };
 use mtr_oudia_application::{
     BusinessError, ConversionService, ConversionSessionStore, EndpointDto, InspectionDto,
-    MtrEndpoint, SessionId, SnapshotDto,
+    MtrEndpoint, RouteCandidateDto, SessionId, SnapshotDto,
 };
 use mtr_oudia_infrastructure::{
     FileMinecraftLogProvider, FileOudiaRepository, JsonSettingsRepository, ReqwestMtrApiClient,
@@ -110,6 +110,14 @@ enum BackendCommand {
         session_id: SessionId,
         location: PathBuf,
         reply: oneshot::Sender<Result<InspectionDto, BusinessError>>,
+    },
+    FindRouteCandidates {
+        session_id: SessionId,
+        route_id: String,
+        diagram_index: Option<usize>,
+        train_type: Option<usize>,
+        train_number: Option<String>,
+        reply: oneshot::Sender<Result<Vec<RouteCandidateDto>, BusinessError>>,
     },
 }
 
@@ -222,6 +230,25 @@ impl AppBackend {
         })
     }
 
+    /// 選択された MTR 路線とフィルタ条件から OuDia 列車テンプレート候補を検索する。
+    pub fn find_route_candidates(
+        &self,
+        session_id: SessionId,
+        route_id: String,
+        diagram_index: Option<usize>,
+        train_type: Option<usize>,
+        train_number: Option<String>,
+    ) -> oneshot::Receiver<Result<Vec<RouteCandidateDto>, BusinessError>> {
+        self.dispatch(|reply| BackendCommand::FindRouteCandidates {
+            session_id,
+            route_id,
+            diagram_index,
+            train_type,
+            train_number,
+            reply,
+        })
+    }
+
     /// 待受ポート列挙による MTR 自動検出に対応している環境かどうかを返す。
     pub fn auto_detection_supported() -> bool {
         cfg!(target_os = "windows")
@@ -295,6 +322,28 @@ fn run_worker_loop(
                     in_flight.push(
                         async move {
                             let result = service.inspect_oudia(&session_id, &location);
+                            let _ = reply.send(result);
+                        }
+                        .boxed_local(),
+                    );
+                }
+                BackendCommand::FindRouteCandidates {
+                    session_id,
+                    route_id,
+                    diagram_index,
+                    train_type,
+                    train_number,
+                    reply,
+                } => {
+                    in_flight.push(
+                        async move {
+                            let result = service.find_route_candidates_by_number(
+                                &session_id,
+                                &route_id,
+                                diagram_index,
+                                train_type,
+                                train_number.as_deref(),
+                            );
                             let _ = reply.send(result);
                         }
                         .boxed_local(),

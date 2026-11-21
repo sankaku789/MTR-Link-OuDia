@@ -1,4 +1,4 @@
-//! Carbon Design System v11 ベースの 5 ステップ画面シェルと Step 1（MTR 接続）・Step 2（OuDia 選択）。
+//! Carbon Design System v11 ベースの 5 ステップ画面シェルと Step 1〜3 の実装。
 //!
 //! バックエンド処理はすべて [`gpui_poc::backend::AppBackend`] 経由で実行する。
 
@@ -15,7 +15,8 @@ use gpui_poc::carbon::{
     TagKind, TileLayer, carbon_button, carbon_inline_notification, carbon_tag, carbon_tile,
 };
 use mtr_oudia_application::{
-    BusinessError, EndpointDto, InspectionDto, MtrEndpoint, SessionId, SnapshotDto,
+    BusinessError, CandidateId, EndpointDto, InspectionDto, MtrEndpoint, RouteCandidateDto,
+    SessionId, SnapshotDto,
 };
 
 const TRANSPARENT: Rgba = Rgba {
@@ -82,7 +83,7 @@ impl AppStep {
     }
 }
 
-/// Step 1・Step 2 の処理状態と通知内容。
+/// Step 1〜3 の処理状態と通知内容。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppStatus {
     InitFailed {
@@ -126,13 +127,25 @@ pub enum AppStatus {
         title: String,
         detail: String,
     },
+    FindingCandidates,
+    CandidatesFound {
+        count: usize,
+        auto_selected: bool,
+    },
+    CandidatesError {
+        title: String,
+        detail: String,
+    },
 }
 
 impl AppStatus {
     pub fn is_busy(&self) -> bool {
         matches!(
             self,
-            Self::Detecting | Self::Fetching { .. } | Self::InspectingOudia { .. }
+            Self::Detecting
+                | Self::Fetching { .. }
+                | Self::InspectingOudia { .. }
+                | Self::FindingCandidates
         )
     }
 
@@ -146,6 +159,10 @@ impl AppStatus {
 
     pub fn is_inspecting(&self) -> bool {
         matches!(self, Self::InspectingOudia { .. })
+    }
+
+    pub fn is_finding_candidates(&self) -> bool {
+        matches!(self, Self::FindingCandidates)
     }
 
     pub fn is_init_failed(&self) -> bool {
@@ -219,6 +236,39 @@ pub fn status_notification(status: &AppStatus) -> (NotificationKind, String, Str
         AppStatus::InspectError { title, detail } => {
             (NotificationKind::Error, title.clone(), detail.clone())
         }
+        AppStatus::FindingCandidates => (
+            NotificationKind::Info,
+            "照合中".to_string(),
+            "MTR 路線と OuDia の列車テンプレート候補を検索しています...".to_string(),
+        ),
+        AppStatus::CandidatesFound {
+            count,
+            auto_selected,
+        } => {
+            if *count == 0 {
+                (
+                    NotificationKind::Warning,
+                    "候補なし".to_string(),
+                    "条件に一致する候補が見つかりませんでした。ダイヤや列車種別を変更してください。"
+                        .to_string(),
+                )
+            } else if *auto_selected {
+                (
+                    NotificationKind::Success,
+                    "照合完了".to_string(),
+                    format!("{count} 件の候補が見つかり、一致候補を自動選択しました"),
+                )
+            } else {
+                (
+                    NotificationKind::Info,
+                    "照合完了".to_string(),
+                    format!("{count} 件の候補が見つかりました。一覧から候補を選択してください"),
+                )
+            }
+        }
+        AppStatus::CandidatesError { title, detail } => {
+            (NotificationKind::Error, title.clone(), detail.clone())
+        }
     }
 }
 
@@ -260,6 +310,34 @@ fn inspect_button_label(inspecting: bool) -> &'static str {
     }
 }
 
+fn find_candidates_button_label(finding: bool) -> &'static str {
+    if finding {
+        "検索中..."
+    } else {
+        "候補を検索"
+    }
+}
+
+fn direction_label(direction: &str) -> &str {
+    match direction {
+        "kudari" => "下り",
+        "nobori" => "上り",
+        other => other,
+    }
+}
+
+fn candidate_rank_badge(rank: &str) -> (&str, TagKind) {
+    match rank {
+        "PrimaryExact" => ("完全一致", TagKind::Green),
+        "MultilingualExact" => ("多言語一致", TagKind::Green),
+        "AliasExact" => ("別名一致", TagKind::Blue),
+        "CollapsedDuplicateExact" => ("重複統合一致", TagKind::Blue),
+        "Partial" => ("部分一致", TagKind::WarmGray),
+        "manual" => ("手動対応", TagKind::CoolGray),
+        other => (other, TagKind::CoolGray),
+    }
+}
+
 fn kijun_status_badge(kijun_status: &str) -> (&str, TagKind) {
     match kijun_status {
         "valid" => ("valid", TagKind::Green),
@@ -287,6 +365,11 @@ struct MtrShellState {
     snapshot: Option<SnapshotDto>,
     oudia_path: Option<PathBuf>,
     inspection: Option<InspectionDto>,
+    selected_route_id: Option<String>,
+    selected_diagram_index: Option<usize>,
+    selected_train_type: Option<usize>,
+    route_candidates: Vec<RouteCandidateDto>,
+    selected_candidate_id: Option<CandidateId>,
     status: AppStatus,
 }
 
@@ -308,6 +391,11 @@ impl MtrShellState {
             snapshot: None,
             oudia_path: None,
             inspection: None,
+            selected_route_id: None,
+            selected_diagram_index: None,
+            selected_train_type: None,
+            route_candidates: Vec::new(),
+            selected_candidate_id: None,
             status,
         }
     }
@@ -316,7 +404,8 @@ impl MtrShellState {
         match step {
             AppStep::Step1Mtr => self.snapshot.is_some(),
             AppStep::Step2Oudia => self.inspection.is_some(),
-            AppStep::Step3RouteMatch | AppStep::Step4Preview | AppStep::Step5Save => false,
+            AppStep::Step3RouteMatch => self.selected_candidate_id.is_some(),
+            AppStep::Step4Preview | AppStep::Step5Save => false,
         }
     }
 
@@ -324,7 +413,23 @@ impl MtrShellState {
         self.current_step = step;
     }
 
-    /// 接続先を選択し、異なる接続先へ切り替わった場合は旧 `snapshot` をクリアする。
+    fn clear_candidate_selection(&mut self) {
+        self.route_candidates.clear();
+        self.selected_candidate_id = None;
+    }
+
+    fn clear_step3_for_snapshot_change(&mut self) {
+        self.selected_route_id = None;
+        self.clear_candidate_selection();
+    }
+
+    fn clear_step3_for_inspection_change(&mut self) {
+        self.selected_diagram_index = None;
+        self.selected_train_type = None;
+        self.clear_candidate_selection();
+    }
+
+    /// 接続先を選択し、異なる接続先へ切り替わった場合は旧 `snapshot` と下流状態をクリアする。
     fn select_endpoint(&mut self, endpoint: String) -> bool {
         if self.status.is_busy() {
             return false;
@@ -345,6 +450,7 @@ impl MtrShellState {
         if self.selected_endpoint.as_deref() != Some(endpoint.as_str()) {
             self.snapshot = None;
             self.dimension = 0;
+            self.clear_step3_for_snapshot_change();
         }
         self.selected_endpoint = Some(endpoint);
     }
@@ -363,12 +469,16 @@ impl MtrShellState {
                     let endpoint = urls[0].clone();
                     self.candidates = urls;
                     self.apply_selected_endpoint(endpoint.clone());
+                    self.route_candidates.clear();
+                    self.selected_candidate_id = None;
                     self.status = AppStatus::DetectedSingle { endpoint };
                 } else {
                     let selected = urls[0].clone();
                     let count = urls.len();
                     self.candidates = urls;
                     self.apply_selected_endpoint(selected.clone());
+                    self.route_candidates.clear();
+                    self.selected_candidate_id = None;
                     self.status = AppStatus::DetectedMultiple { count, selected };
                 }
             }
@@ -390,6 +500,7 @@ impl MtrShellState {
                 let stop_count: usize = dto.routes.iter().map(|route| route.station_count).sum();
                 self.dimension = dimension;
                 self.snapshot = Some(dto);
+                self.clear_step3_for_snapshot_change();
                 self.status = AppStatus::FetchSuccess {
                     route_count,
                     stop_count,
@@ -414,6 +525,7 @@ impl MtrShellState {
                 let diagram_count = dto.diagrams.len();
                 self.oudia_path = Some(path);
                 self.inspection = Some(dto);
+                self.clear_step3_for_inspection_change();
                 self.status = AppStatus::InspectSuccess {
                     file_type,
                     station_count,
@@ -423,6 +535,74 @@ impl MtrShellState {
             Err(err) => {
                 let (title, detail) = format_business_error(&err);
                 self.status = AppStatus::InspectError { title, detail };
+            }
+        }
+    }
+
+    fn select_route(&mut self, route_id: String) -> bool {
+        if self.status.is_busy() || self.status.is_init_failed() {
+            return false;
+        }
+        if self.selected_route_id.as_deref() != Some(route_id.as_str()) {
+            self.selected_route_id = Some(route_id);
+            self.clear_candidate_selection();
+        }
+        true
+    }
+
+    fn select_diagram_index(&mut self, diagram_index: Option<usize>) -> bool {
+        if self.status.is_busy() || self.status.is_init_failed() {
+            return false;
+        }
+        if self.selected_diagram_index != diagram_index {
+            self.selected_diagram_index = diagram_index;
+            self.clear_candidate_selection();
+        }
+        true
+    }
+
+    fn select_train_type(&mut self, train_type: Option<usize>) -> bool {
+        if self.status.is_busy() || self.status.is_init_failed() {
+            return false;
+        }
+        if self.selected_train_type != train_type {
+            self.selected_train_type = train_type;
+            self.clear_candidate_selection();
+        }
+        true
+    }
+
+    fn select_candidate(&mut self, candidate_id: CandidateId) -> bool {
+        if self.status.is_busy() || self.status.is_init_failed() {
+            return false;
+        }
+        if self.route_candidates.iter().any(|c| c.id == candidate_id) {
+            self.selected_candidate_id = Some(candidate_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn apply_candidates_result(&mut self, result: Result<Vec<RouteCandidateDto>, BusinessError>) {
+        match result {
+            Ok(candidates) => {
+                let count = candidates.len();
+                let auto_selected_id = candidates
+                    .iter()
+                    .find(|candidate| candidate.auto_selected)
+                    .map(|candidate| candidate.id.clone());
+                let auto_selected = auto_selected_id.is_some();
+                self.route_candidates = candidates;
+                self.selected_candidate_id = auto_selected_id;
+                self.status = AppStatus::CandidatesFound {
+                    count,
+                    auto_selected,
+                };
+            }
+            Err(err) => {
+                let (title, detail) = format_business_error(&err);
+                self.status = AppStatus::CandidatesError { title, detail };
             }
         }
     }
@@ -614,6 +794,48 @@ impl MtrApp {
                     Err(_) => {
                         this.state.status = AppStatus::InspectError {
                             title: "OuDia 解析が中断されました".to_string(),
+                            detail: "バックグラウンド処理との通信が終了しました。".to_string(),
+                        };
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_find_candidates(&mut self, cx: &mut Context<Self>) {
+        if self.state.status.is_busy() || self.state.status.is_init_failed() {
+            return;
+        }
+        let Some(route_id) = self.state.selected_route_id.clone() else {
+            self.state.status = AppStatus::CandidatesError {
+                title: "MTR 路線が未選択です".to_string(),
+                detail: "左の一覧から照合対象の MTR 路線を選択してください。".to_string(),
+            };
+            cx.notify();
+            return;
+        };
+        let (Some(backend), Some(session_id)) = (&self.backend, self.session_id.clone()) else {
+            return;
+        };
+
+        let diagram_index = self.state.selected_diagram_index;
+        let train_type = self.state.selected_train_type;
+        self.state.status = AppStatus::FindingCandidates;
+        cx.notify();
+
+        let rx =
+            backend.find_route_candidates(session_id, route_id, diagram_index, train_type, None);
+        cx.spawn(async move |this, cx| {
+            let received = rx.await;
+            this.update(cx, |this, cx| {
+                match received {
+                    Ok(result) => this.state.apply_candidates_result(result),
+                    Err(_) => {
+                        this.state.status = AppStatus::CandidatesError {
+                            title: "候補検索が中断されました".to_string(),
                             detail: "バックグラウンド処理との通信が終了しました。".to_string(),
                         };
                     }
@@ -1346,6 +1568,525 @@ impl MtrApp {
             .child(inspection_tile)
     }
 
+    fn render_step3(&self, cx: &mut Context<Self>) -> Div {
+        let theme = &self.state.theme;
+        let c = &theme.colors;
+        let busy = self.state.status.is_busy();
+        let disabled = busy || self.state.status.is_init_failed();
+        let finding = self.state.status.is_finding_candidates();
+
+        let (Some(snapshot), Some(inspection)) = (&self.state.snapshot, &self.state.inspection)
+        else {
+            let (title, subtitle) = match (&self.state.snapshot, &self.state.inspection) {
+                (None, None) => (
+                    "Step 1・Step 2 が未完了です",
+                    "Step 1（MTR 接続）でスナップショットを取得し、Step 2（OuDia 選択）で OuDia ファイルを解析してください。",
+                ),
+                (None, Some(_)) => (
+                    "Step 1（MTR 接続）が未完了です",
+                    "Step 1 で MTR 接続先からスナップショットを取得してから路線を照合してください。",
+                ),
+                (Some(_), None) => (
+                    "Step 2（OuDia 選択）が未完了です",
+                    "Step 2 で OuDia (.oud2) ファイルを選択・解析してから路線を照合してください。",
+                ),
+                (Some(_), Some(_)) => unreachable!(),
+            };
+            return div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
+                .child(carbon_inline_notification(
+                    NotificationKind::Info,
+                    title,
+                    subtitle,
+                    theme,
+                ));
+        };
+
+        let (notif_kind, notif_title, notif_subtitle) = status_notification(&self.state.status);
+        let notification =
+            carbon_inline_notification(notif_kind, notif_title, notif_subtitle, theme);
+
+        let route_list_content = if snapshot.routes.is_empty() {
+            div()
+                .py(CarbonSpacing::px(CarbonSpacing::SP_04))
+                .text_size(CarbonTypography::BODY_01.font_size_px())
+                .line_height(CarbonTypography::BODY_01.line_height_px())
+                .text_color(c.text_secondary)
+                .child("取得されたスナップショットに路線が含まれていません")
+                .into_any_element()
+        } else {
+            let active_route_id = self.state.selected_route_id.as_deref();
+            let hover_bg = c.layer_hover_01;
+            div()
+                .id("step3-routes")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                .children(snapshot.routes.iter().enumerate().map(|(index, route)| {
+                    let is_selected = active_route_id == Some(route.id.as_str());
+                    let route_id = route.id.clone();
+                    let bg = if is_selected {
+                        c.layer_hover_01
+                    } else {
+                        c.layer_02
+                    };
+                    let border_color = if is_selected {
+                        c.button_primary
+                    } else {
+                        c.border_subtle
+                    };
+
+                    let mut row = div()
+                        .id(SharedString::from(format!("step3-route-{index}")))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .min_w_0()
+                        .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                        .px(CarbonSpacing::px(CarbonSpacing::SP_04))
+                        .py(CarbonSpacing::px(CarbonSpacing::SP_03))
+                        .bg(bg)
+                        .border_1()
+                        .border_color(border_color)
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .font_weight(if is_selected {
+                                    FontWeight::SEMIBOLD
+                                } else {
+                                    FontWeight::NORMAL
+                                })
+                                .text_size(CarbonTypography::BODY_01.font_size_px())
+                                .line_height(CarbonTypography::BODY_01.line_height_px())
+                                .text_color(c.text_primary)
+                                .child(format!("{}. {}", index + 1, route.name)),
+                        );
+
+                    let mut tags = div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .flex_shrink_0()
+                        .gap(CarbonSpacing::px(CarbonSpacing::SP_02));
+                    if is_selected {
+                        tags = tags.child(carbon_tag("選択中", TagKind::Blue, theme));
+                    }
+                    tags = tags.child(carbon_tag(
+                        format!("{} 駅", route.station_count),
+                        TagKind::CoolGray,
+                        theme,
+                    ));
+                    row = row.child(tags);
+
+                    if disabled {
+                        row.cursor_not_allowed()
+                    } else {
+                        row.cursor_pointer()
+                            .hover(move |style| style.bg(hover_bg))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                                if this.state.select_route(route_id.clone()) {
+                                    cx.notify();
+                                }
+                            }))
+                    }
+                }))
+                .into_any_element()
+        };
+
+        let routes_tile = carbon_tile(TileLayer::Layer01, theme)
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(CarbonTypography::HEADING_02.font_size_px())
+                            .line_height(CarbonTypography::HEADING_02.line_height_px())
+                            .text_color(c.text_primary)
+                            .child("MTR 路線選択"),
+                    )
+                    .child(carbon_tag(
+                        format!("{} 路線", snapshot.routes.len()),
+                        TagKind::CoolGray,
+                        theme,
+                    )),
+            )
+            .child(route_list_content);
+
+        let diagram_buttons = std::iter::once(carbon_button(
+            "step3-diagram-kijun",
+            "基準ダイヤ",
+            if self.state.selected_diagram_index.is_none() {
+                ButtonKind::Primary
+            } else {
+                ButtonKind::Secondary
+            },
+            disabled,
+            theme,
+            cx.listener(|this, _: &ClickEvent, _window, cx| {
+                if this.state.select_diagram_index(None) {
+                    cx.notify();
+                }
+            }),
+        ))
+        .chain(inspection.diagrams.iter().map(|diagram| {
+            let diagram_idx = diagram.index;
+            let is_selected = self.state.selected_diagram_index == Some(diagram_idx);
+            carbon_button(
+                SharedString::from(format!("step3-diagram-{diagram_idx}")),
+                format!("ダイヤ #{diagram_idx} ({} 本)", diagram.train_count),
+                if is_selected {
+                    ButtonKind::Primary
+                } else {
+                    ButtonKind::Secondary
+                },
+                disabled,
+                theme,
+                cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    if this.state.select_diagram_index(Some(diagram_idx)) {
+                        cx.notify();
+                    }
+                }),
+            )
+        }));
+
+        let train_type_buttons =
+            std::iter::once(carbon_button(
+                "step3-train-type-all",
+                "すべて",
+                if self.state.selected_train_type.is_none() {
+                    ButtonKind::Primary
+                } else {
+                    ButtonKind::Secondary
+                },
+                disabled,
+                theme,
+                cx.listener(|this, _: &ClickEvent, _window, cx| {
+                    if this.state.select_train_type(None) {
+                        cx.notify();
+                    }
+                }),
+            ))
+            .chain(inspection.train_type_names.iter().enumerate().map(
+                |(index, name)| {
+                    let is_selected = self.state.selected_train_type == Some(index);
+                    let label = if name.is_empty() {
+                        format!("種別 {index}")
+                    } else {
+                        name.clone()
+                    };
+                    carbon_button(
+                        SharedString::from(format!("step3-train-type-{index}")),
+                        label,
+                        if is_selected {
+                            ButtonKind::Primary
+                        } else {
+                            ButtonKind::Secondary
+                        },
+                        disabled,
+                        theme,
+                        cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                            if this.state.select_train_type(Some(index)) {
+                                cx.notify();
+                            }
+                        }),
+                    )
+                },
+            ));
+
+        let search_disabled = disabled || self.state.selected_route_id.is_none();
+        let filter_tile = carbon_tile(TileLayer::Layer01, theme)
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(CarbonTypography::HEADING_02.font_size_px())
+                            .line_height(CarbonTypography::HEADING_02.line_height_px())
+                            .text_color(c.text_primary)
+                            .child("ダイヤ・種別フィルタ"),
+                    )
+                    .child(carbon_button(
+                        "step3-find-candidates",
+                        find_candidates_button_label(finding),
+                        ButtonKind::Primary,
+                        search_disabled,
+                        theme,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.start_find_candidates(cx);
+                        }),
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                    .child(
+                        div()
+                            .text_size(CarbonTypography::LABEL_01.font_size_px())
+                            .line_height(CarbonTypography::LABEL_01.line_height_px())
+                            .text_color(c.text_secondary)
+                            .child("ダイヤ"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                            .children(diagram_buttons),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w_0()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                    .child(
+                        div()
+                            .text_size(CarbonTypography::LABEL_01.font_size_px())
+                            .line_height(CarbonTypography::LABEL_01.line_height_px())
+                            .text_color(c.text_secondary)
+                            .child("列車種別"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                            .children(train_type_buttons),
+                    ),
+            );
+
+        let candidate_list_content = if self.state.route_candidates.is_empty() {
+            div()
+                .py(CarbonSpacing::px(CarbonSpacing::SP_04))
+                .text_size(CarbonTypography::BODY_01.font_size_px())
+                .line_height(CarbonTypography::BODY_01.line_height_px())
+                .text_color(c.text_secondary)
+                .child(if finding {
+                    "候補を検索しています..."
+                } else if self.state.selected_route_id.is_none() {
+                    "左の一覧から MTR 路線を選択し、「候補を検索」を押してください"
+                } else if matches!(
+                    self.state.status,
+                    AppStatus::CandidatesFound { count: 0, .. }
+                ) {
+                    "条件に一致する候補はありませんでした"
+                } else {
+                    "「候補を検索」を押すと照合候補が表示されます"
+                })
+                .into_any_element()
+        } else {
+            let active_candidate_id = self.state.selected_candidate_id.as_ref();
+            let hover_bg = c.layer_hover_01;
+            div()
+                .id("step3-candidates")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                .children(self.state.route_candidates.iter().enumerate().map(
+                    |(index, candidate)| {
+                        let is_selected = active_candidate_id == Some(&candidate.id);
+                        let candidate_id = candidate.id.clone();
+                        let (rank_label, rank_kind) = candidate_rank_badge(&candidate.rank);
+                        let direction = direction_label(&candidate.direction);
+                        let reason = candidate
+                            .reasons
+                            .first()
+                            .map(String::as_str)
+                            .unwrap_or("照合詳細なし")
+                            .to_string();
+                        let bg = if is_selected {
+                            c.layer_hover_01
+                        } else {
+                            c.layer_02
+                        };
+                        let border_color = if is_selected {
+                            c.button_primary
+                        } else {
+                            c.border_subtle
+                        };
+
+                        let mut header_tags = div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                            .child(carbon_tag(rank_label.to_string(), rank_kind, theme));
+                        if candidate.auto_selected {
+                            header_tags =
+                                header_tags.child(carbon_tag("自動選択", TagKind::Blue, theme));
+                        }
+                        if is_selected {
+                            header_tags =
+                                header_tags.child(carbon_tag("選択中", TagKind::Green, theme));
+                        }
+                        header_tags = header_tags.child(carbon_tag(
+                            format!("{} 駅一致", candidate.station_mappings.len()),
+                            TagKind::CoolGray,
+                            theme,
+                        ));
+
+                        let card = div()
+                            .id(SharedString::from(format!("step3-candidate-{index}")))
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                            .px(CarbonSpacing::px(CarbonSpacing::SP_04))
+                            .py(CarbonSpacing::px(CarbonSpacing::SP_03))
+                            .bg(bg)
+                            .border_1()
+                            .border_color(border_color)
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .justify_between()
+                                    .min_w_0()
+                                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_size(CarbonTypography::BODY_01.font_size_px())
+                                            .line_height(CarbonTypography::BODY_01.line_height_px())
+                                            .text_color(c.text_primary)
+                                            .child(format!(
+                                                "{direction} / ダイヤ #{} ・ 列車 #{}",
+                                                candidate.diagram_index, candidate.train_index
+                                            )),
+                                    )
+                                    .child(header_tags),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(CarbonTypography::LABEL_01.font_size_px())
+                                    .line_height(CarbonTypography::LABEL_01.line_height_px())
+                                    .text_color(c.text_secondary)
+                                    .child(reason),
+                            );
+
+                        if disabled {
+                            card.cursor_not_allowed()
+                        } else {
+                            card.cursor_pointer()
+                                .hover(move |style| style.bg(hover_bg))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                                    if this.state.select_candidate(candidate_id.clone()) {
+                                        cx.notify();
+                                    }
+                                }))
+                        }
+                    },
+                ))
+                .into_any_element()
+        };
+
+        let candidates_tile = carbon_tile(TileLayer::Layer01, theme)
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_size(CarbonTypography::HEADING_02.font_size_px())
+                            .line_height(CarbonTypography::HEADING_02.line_height_px())
+                            .text_color(c.text_primary)
+                            .child("照合候補一覧"),
+                    )
+                    .child(carbon_tag(
+                        format!("{} 件", self.state.route_candidates.len()),
+                        TagKind::CoolGray,
+                        theme,
+                    )),
+            )
+            .child(candidate_list_content);
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
+            .child(notification)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .flex_row()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
+                    .child(routes_tile)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
+                            .child(filter_tile)
+                            .child(candidates_tile),
+                    ),
+            )
+    }
+
     fn render_placeholder_step(&self, step: AppStep) -> Div {
         let theme = &self.state.theme;
         let c = &theme.colors;
@@ -1413,9 +2154,8 @@ impl MtrApp {
         let body = match step {
             AppStep::Step1Mtr => self.render_step1(cx),
             AppStep::Step2Oudia => self.render_step2(cx),
-            AppStep::Step3RouteMatch | AppStep::Step4Preview | AppStep::Step5Save => {
-                self.render_placeholder_step(step)
-            }
+            AppStep::Step3RouteMatch => self.render_step3(cx),
+            AppStep::Step4Preview | AppStep::Step5Save => self.render_placeholder_step(step),
         };
 
         div()
@@ -1839,6 +2579,223 @@ mod tests {
                 NotificationKind::Error,
                 "OuDia ファイルの解析に失敗しました".to_string(),
                 "Rosenmei が見つかりません".to_string(),
+            )
+        );
+    }
+
+    fn dummy_candidate(
+        id: &str,
+        diagram_index: usize,
+        train_index: usize,
+        rank: &str,
+        auto_selected: bool,
+        matched_stations: usize,
+    ) -> RouteCandidateDto {
+        use mtr_oudia_application::StationMappingDto;
+        RouteCandidateDto {
+            id: CandidateId(id.to_string()),
+            diagram_index,
+            train_index,
+            direction: "kudari".to_string(),
+            station_mappings: (0..matched_stations)
+                .map(|idx| StationMappingDto {
+                    mtr_station_index: idx,
+                    oudia_station_slot: idx,
+                })
+                .collect(),
+            rank: rank.to_string(),
+            reasons: vec!["station sequence matched".to_string()],
+            auto_selected,
+            manual_only: rank == "manual",
+        }
+    }
+
+    #[test]
+    fn apply_candidates_result_handles_auto_manual_empty_and_error() {
+        let mut state = MtrShellState::new(Ok(()));
+        assert!(!state.is_step_completed(AppStep::Step3RouteMatch));
+
+        // 1. 自動選択あり
+        state.apply_candidates_result(Ok(vec![
+            dummy_candidate("cand-1", 0, 2, "PrimaryExact", true, 10),
+            dummy_candidate("cand-2", 0, 5, "Partial", false, 6),
+        ]));
+        assert_eq!(state.route_candidates.len(), 2);
+        assert_eq!(
+            state.selected_candidate_id,
+            Some(CandidateId("cand-1".to_string()))
+        );
+        assert!(state.is_step_completed(AppStep::Step3RouteMatch));
+        assert_eq!(
+            state.status,
+            AppStatus::CandidatesFound {
+                count: 2,
+                auto_selected: true,
+            }
+        );
+
+        // 2. 複数手動候補（auto_selected == false のみ）
+        state.apply_candidates_result(Ok(vec![
+            dummy_candidate("cand-3", 1, 0, "Partial", false, 5),
+            dummy_candidate("cand-4", 1, 1, "Partial", false, 4),
+        ]));
+        assert_eq!(state.route_candidates.len(), 2);
+        assert!(state.selected_candidate_id.is_none());
+        assert!(!state.is_step_completed(AppStep::Step3RouteMatch));
+        assert_eq!(
+            state.status,
+            AppStatus::CandidatesFound {
+                count: 2,
+                auto_selected: false,
+            }
+        );
+
+        // 手動選択で Step3RouteMatch が完了になる
+        assert!(state.select_candidate(CandidateId("cand-4".to_string())));
+        assert!(state.is_step_completed(AppStep::Step3RouteMatch));
+
+        // 3. 0件
+        state.apply_candidates_result(Ok(Vec::new()));
+        assert!(state.route_candidates.is_empty());
+        assert!(state.selected_candidate_id.is_none());
+        assert!(!state.is_step_completed(AppStep::Step3RouteMatch));
+        assert_eq!(
+            state.status,
+            AppStatus::CandidatesFound {
+                count: 0,
+                auto_selected: false,
+            }
+        );
+
+        // 4. エラー
+        state.apply_candidates_result(Err(BusinessError {
+            kind: BusinessErrorKind::Validation,
+            message: "路線が見つかりません".to_string(),
+            detail: Some("route-missing".to_string()),
+        }));
+        assert_eq!(
+            state.status,
+            AppStatus::CandidatesError {
+                title: "路線が見つかりません".to_string(),
+                detail: "route-missing".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn upstream_updates_clear_downstream_step3_state() {
+        let mut state = MtrShellState::new(Ok(()));
+        state.candidates = vec![
+            "http://127.0.0.1:49182/".to_string(),
+            "http://127.0.0.1:49183/".to_string(),
+        ];
+        assert!(state.select_endpoint("http://127.0.0.1:49182/".to_string()));
+        state.apply_snapshot_result(0, Ok(dummy_snapshot(vec![("山手線", 30)])));
+        state.apply_inspection_result(
+            PathBuf::from("/tmp/yamanote.oud2"),
+            Ok(dummy_inspection("OuDiaSecond.1.04", Some("山手線"), 30)),
+        );
+
+        assert!(state.select_route("route-0".to_string()));
+        assert!(state.select_diagram_index(Some(1)));
+        assert!(state.select_train_type(Some(0)));
+        state.apply_candidates_result(Ok(vec![dummy_candidate(
+            "cand-1",
+            1,
+            0,
+            "PrimaryExact",
+            true,
+            30,
+        )]));
+        assert!(state.selected_route_id.is_some());
+        assert_eq!(state.selected_diagram_index, Some(1));
+        assert_eq!(state.selected_train_type, Some(0));
+        assert!(!state.route_candidates.is_empty());
+        assert!(state.selected_candidate_id.is_some());
+
+        // Step 1 スナップショット更新で selected_route_id / route_candidates / selected_candidate_id がクリアされる
+        state.apply_snapshot_result(1, Ok(dummy_snapshot(vec![("京浜東北線", 35)])));
+        assert!(state.selected_route_id.is_none());
+        assert!(state.route_candidates.is_empty());
+        assert!(state.selected_candidate_id.is_none());
+        assert_eq!(state.selected_diagram_index, Some(1));
+        assert_eq!(state.selected_train_type, Some(0));
+
+        // 再度選択して、Step 1 接続先変更時もクリアされることを確認
+        assert!(state.select_route("route-0".to_string()));
+        state.apply_candidates_result(Ok(vec![dummy_candidate(
+            "cand-2",
+            1,
+            2,
+            "PrimaryExact",
+            true,
+            35,
+        )]));
+        assert!(state.select_endpoint("http://127.0.0.1:49183/".to_string()));
+        assert!(state.selected_route_id.is_none());
+        assert!(state.route_candidates.is_empty());
+        assert!(state.selected_candidate_id.is_none());
+
+        // Step 2 OuDia 更新で selected_diagram_index / selected_train_type / route_candidates / selected_candidate_id がクリアされる
+        state.apply_snapshot_result(0, Ok(dummy_snapshot(vec![("山手線", 30)])));
+        assert!(state.select_route("route-0".to_string()));
+        assert!(state.select_diagram_index(Some(0)));
+        assert!(state.select_train_type(Some(1)));
+        state.apply_candidates_result(Ok(vec![dummy_candidate(
+            "cand-3",
+            0,
+            1,
+            "PrimaryExact",
+            true,
+            30,
+        )]));
+        state.apply_inspection_result(
+            PathBuf::from("/tmp/chuo.oud2"),
+            Ok(dummy_inspection("OuDiaSecond.1.04", Some("中央線"), 24)),
+        );
+        assert_eq!(state.selected_route_id.as_deref(), Some("route-0"));
+        assert!(state.selected_diagram_index.is_none());
+        assert!(state.selected_train_type.is_none());
+        assert!(state.route_candidates.is_empty());
+        assert!(state.selected_candidate_id.is_none());
+    }
+
+    #[test]
+    fn status_notification_maps_step3_statuses() {
+        let finding = AppStatus::FindingCandidates;
+        assert!(finding.is_busy());
+        assert!(finding.is_finding_candidates());
+        assert_eq!(status_notification(&finding).0, NotificationKind::Info);
+
+        let auto = AppStatus::CandidatesFound {
+            count: 1,
+            auto_selected: true,
+        };
+        assert!(!auto.is_busy());
+        assert_eq!(status_notification(&auto).0, NotificationKind::Success);
+
+        let manual = AppStatus::CandidatesFound {
+            count: 3,
+            auto_selected: false,
+        };
+        assert_eq!(status_notification(&manual).0, NotificationKind::Info);
+
+        let empty = AppStatus::CandidatesFound {
+            count: 0,
+            auto_selected: false,
+        };
+        assert_eq!(status_notification(&empty).0, NotificationKind::Warning);
+
+        let err = AppStatus::CandidatesError {
+            title: "路線が見つかりません".to_string(),
+            detail: "route-0".to_string(),
+        };
+        assert_eq!(
+            status_notification(&err),
+            (
+                NotificationKind::Error,
+                "路線が見つかりません".to_string(),
+                "route-0".to_string(),
             )
         );
     }
