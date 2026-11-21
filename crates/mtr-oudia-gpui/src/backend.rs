@@ -835,6 +835,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::type_complexity)]
     fn test_snapshot(
         routes: Vec<(&str, &str, Vec<(&str, &str, i64, Option<i64>)>)>,
         api_current_time_millis: i64,

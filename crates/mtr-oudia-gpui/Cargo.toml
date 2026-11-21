@@ -1,0 +1,21 @@
+[package]
+name = "mtr-oudia-gpui"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "mtr-link-oudia"
+path = "src/main.rs"
+
+[dependencies]
+# 0.2.2 には Windows の IME 切り替え修正 (Zed PR #41259) が入っていないため、
+# 修正コミット以降の gpui を git で固定する。
+gpui = { git = "https://github.com/zed-industries/zed", rev = "2ead8c42fb6792095d7cb02f7b89e467421dc8a0" }
+unicode-segmentation = "1"
+
+mtr-oudia-application = { path = "../mtr-oudia-application" }
+mtr-oudia-domain = { path = "../mtr-oudia-domain" }
+mtr-oudia-infrastructure = { path = "../mtr-oudia-infrastructure" }
+futures = "0.3"
+tokio = { version = "1", features = ["rt", "net", "time"] }

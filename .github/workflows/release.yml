@@ -1,4 +1,4 @@
-name: Release 
+name: Release
 
 on:
   push:
@@ -17,39 +17,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            . -> target
-            src-tauri -> target
 
-      - name: Install frontend dependencies
-        run: npm ci
+      - name: Build release binary
+        run: cargo build --release -p mtr-oudia-gpui
 
-      - name: Build and publish portable EXE
-        uses: tauri-apps/tauri-action@v1
+      - name: Publish draft GitHub Release
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "mtr-link-oudia ${{ github.ref_name }}"
-          releaseBody: |
-            インストール不要のWindows版です。
-
-            `mtr-link-oudia.exe`をダウンロードして直接起動してください。
-          releaseDraft: true
-          prerelease: false
-          tauriScript: npm run tauri
-          args: --no-bundle
-          uploadPlainBinary: true
-          releaseAssetNamePattern: "mtr-link-oudia_[version]_windows_[arch].[ext]"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ASSET="mtr-link-oudia_${VERSION}_windows_x64.exe"
+          cp target/release/mtr-link-oudia.exe "${ASSET}"
+          gh release create "${GITHUB_REF_NAME}" "${ASSET}" \
+            --draft \
+            --title "mtr-link-oudia ${GITHUB_REF_NAME}" \
+            --notes $'インストール不要のWindows版です。\n\n`mtr-link-oudia.exe`をダウンロードして直接起動してください。'

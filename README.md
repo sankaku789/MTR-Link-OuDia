@@ -122,7 +122,7 @@ WSLからWindows上のMTRへ接続する場合、`127.0.0.1`が同じホスト�
 
 ### macOS
 
-Tauri用アイコンは生成されていますが、動作検証は行っていません。自動検知はWindows限定です。
+動作検証は行っていません。自動検知はWindows限定です。
 
 ## 通信の安全制約
 
@@ -157,12 +157,10 @@ MTR APIの接続先は次の条件に制限されています。
 
 ## 技術構成
 
-- Tauri 2
+- GPUI
 - Rust
-- Svelte 5 / SvelteKit
-- TypeScript
 - reqwest
-- デジタル庁デザインシステムのデザイントークン
+- Carbon Design System v11 ベースのUI
 
 Rustコードは次のワークスペースに分割されています。
 
@@ -170,64 +168,39 @@ Rustコードは次のワークスペースに分割されています。
 crates/mtr-oudia-domain          ドメインモデル、OuDia解析、経路照合、時刻生成、パッチ
 crates/mtr-oudia-application     ユースケース、セッション管理、DTO、Port
 crates/mtr-oudia-infrastructure  HTTP、ファイル、設定、待受ポート取得、安全保存
-src-tauri                        Tauriコマンドとデスクトップアプリ構成
+crates/mtr-oudia-gpui            GPUIデスクトップアプリとUIコンポーネント
 ```
 
 ## 開発環境
 
 必要なツール:
 
-- Node.js 20以降
-- npm
 - Rust stable
-- Tauri 2の各OS向けシステム依存関係
+- Linuxビルド時はGPUIのシステム依存パッケージ（`libxkbcommon-dev`、`libxkbcommon-x11-dev`、`libxcb1-dev`、`libfontconfig1-dev`、`libfreetype6-dev`、`pkg-config`）
 
-依存関係のインストール:
-
-```bash
-npm install
-```
-
-フロントエンドの開発サーバー:
+アプリの開発起動:
 
 ```bash
-npm run dev
-```
-
-Tauriアプリの開発起動:
-
-```bash
-npm run tauri dev
+cargo run -p mtr-oudia-gpui
 ```
 
 ## ビルド
 
-フロントエンドのみ:
+デスクトップアプリ（リリースビルド）:
 
 ```bash
-npm run build
+cargo build --release -p mtr-oudia-gpui
 ```
-
-デスクトップアプリ:
-
-```bash
-npm run tauri build
-```
-
-LinuxでTauriをビルドする場合は、WebKitGTK・GTK・AppIndicatorなどの開発パッケージが必要です。
 
 ## テストと静的検査
 
 ```bash
-cargo fmt --check
+cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-npm run check
-npm test
-npm run build
 ```
 
-Linux環境でワークスペース全体をビルドする場合、Tauriが要求するGTK/WebKit系システムライブラリを事前に導入してください。
+Linux環境で `mtr-oudia-gpui` を含むワークスペース全体のビルド・テストを行う場合は、上記のX11/フォント関連のシステムライブラリを事前に導入してください。
 
 ## 既知の制約
 

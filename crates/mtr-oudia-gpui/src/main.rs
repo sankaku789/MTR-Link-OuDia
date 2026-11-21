@@ -1,6 +1,8 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! Carbon Design System v11 ベースの 5 ステップ画面シェルと Step 1〜5 の実装。
 //!
-//! バックエンド処理はすべて [`gpui_poc::backend::AppBackend`] 経由で実行する。
+//! バックエンド処理はすべて [`mtr_oudia_gpui::backend::AppBackend`] 経由で実行する。
 
 use std::path::{Path, PathBuf};
 
@@ -9,18 +11,18 @@ use gpui::{
     ParentElement, Render, Rgba, ScrollHandle, ScrollWheelEvent, SharedString, Styled,
     Subscription, Window, WindowAppearance, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
-use gpui_poc::backend::{AppBackend, RefreshSnapshotOutcome, format_business_error};
-use gpui_poc::carbon::{
-    ButtonKind, CarbonSpacing, CarbonTheme, CarbonThemeKind, CarbonTypography, NotificationKind,
-    TagKind, TileLayer, carbon_button, carbon_inline_notification, carbon_tag, carbon_tile,
-};
-use gpui_poc::text_input::{TextInput, TextInputStyle, bind_keys as bind_text_input_keys};
 use mtr_oudia_application::{
     BusinessError, CandidateId, EndpointDto, InspectionDto, ManualMappingInput, MtrEndpoint,
     OutboundRuntimeSource, OutboundStatusDto, PreviewDto, PreviewId, RouteCandidateDto, RouteDto,
     SaveReceipt, SessionId, SnapshotDto, StationMappingDto, StationSlotDto, TemplateDto,
 };
 use mtr_oudia_domain::OperationPolicy;
+use mtr_oudia_gpui::backend::{AppBackend, RefreshSnapshotOutcome, format_business_error};
+use mtr_oudia_gpui::carbon::{
+    ButtonKind, CarbonSpacing, CarbonTheme, CarbonThemeKind, CarbonTypography, NotificationKind,
+    TagKind, TileLayer, carbon_button, carbon_inline_notification, carbon_tag, carbon_tile,
+};
+use mtr_oudia_gpui::text_input::{TextInput, TextInputStyle, bind_keys as bind_text_input_keys};
 
 const TRANSPARENT: Rgba = Rgba {
     r: 0.0,
@@ -4812,8 +4814,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui_poc::backend::snapshot_routes_changed;
     use mtr_oudia_application::{BusinessErrorKind, DiagramDto, RouteDto};
+    use mtr_oudia_gpui::backend::snapshot_routes_changed;
 
     fn dummy_snapshot(routes: Vec<(&str, usize)>) -> SnapshotDto {
         SnapshotDto {
@@ -5952,6 +5954,7 @@ mod tests {
         assert_eq!(state.theme.kind, CarbonThemeKind::Gray10);
     }
 
+    #[allow(clippy::type_complexity)]
     fn dummy_detailed_snapshot(
         routes: Vec<(&str, &str, Vec<(&str, &str, i64, Option<i64>)>)>,
         api_current_time_millis: i64,

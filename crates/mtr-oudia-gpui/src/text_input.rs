@@ -50,13 +50,13 @@ pub struct TextInputStyle {
 impl Default for TextInputStyle {
     fn default() -> Self {
         Self {
-            bg: white().into(),
+            bg: white(),
             outer_bg: rgb(0xeeeeee).into(),
             border_color: None,
             focus_border_color: None,
-            text_color: black().into(),
+            text_color: black(),
             placeholder_color: hsla(0., 0., 0., 0.2),
-            cursor_color: gpui::blue().into(),
+            cursor_color: gpui::blue(),
             text_size: px(24.),
             line_height: px(30.),
             height: px(30. + 4. * 2.),
