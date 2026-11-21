@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     App, Application, Bounds, ClickEvent, Context, Div, FontWeight, IntoElement, ParentElement,
-    Render, Rgba, SharedString, Styled, Window, WindowBounds, WindowOptions, div, prelude::*, px,
-    size,
+    Render, Rgba, ScrollHandle, ScrollWheelEvent, SharedString, Styled, Window, WindowBounds,
+    WindowOptions, div, prelude::*, px, size,
 };
 use gpui_poc::backend::{AppBackend, format_business_error};
 use gpui_poc::carbon::{
@@ -46,6 +46,29 @@ impl AppStep {
         Self::Step4Preview,
         Self::Step5Save,
     ];
+
+    /// 0 始まりのインデックスを返す。
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Step1Mtr => 0,
+            Self::Step2Oudia => 1,
+            Self::Step3RouteMatch => 2,
+            Self::Step4Preview => 3,
+            Self::Step5Save => 4,
+        }
+    }
+
+    /// 0 始まりのインデックスから対応するステップを返す。
+    pub const fn from_index(index: usize) -> Option<Self> {
+        match index {
+            0 => Some(Self::Step1Mtr),
+            1 => Some(Self::Step2Oudia),
+            2 => Some(Self::Step3RouteMatch),
+            3 => Some(Self::Step4Preview),
+            4 => Some(Self::Step5Save),
+            _ => None,
+        }
+    }
 
     /// 1 始まりのステップ番号を返す。
     pub const fn number(self) -> u8 {
@@ -485,6 +508,16 @@ fn format_dimension_label(index: usize, value: &impl std::fmt::Display) -> Strin
     format!("{index}: {display}")
 }
 
+/// スクロール位置から現在表示中のステップを判定する。
+///
+/// 末尾付近までスクロールされている場合は最後のステップ (`Step5Save`) を優先する。
+pub fn step_for_scroll_position(top_item: usize, offset_y: f32, max_offset_height: f32) -> AppStep {
+    if max_offset_height > 0.0 && -offset_y >= max_offset_height - 4.0 {
+        return AppStep::Step5Save;
+    }
+    AppStep::from_index(top_item).unwrap_or(AppStep::Step1Mtr)
+}
+
 /// UI から独立してテスト可能なアプリケーション状態。
 struct MtrShellState {
     theme: CarbonTheme,
@@ -787,6 +820,8 @@ struct MtrApp {
     backend: Option<AppBackend>,
     session_id: Option<SessionId>,
     state: MtrShellState,
+    steps_scroll_handle: ScrollHandle,
+    sync_step_from_scroll: bool,
 }
 
 impl MtrApp {
@@ -798,12 +833,16 @@ impl MtrApp {
                     backend: Some(backend),
                     session_id: Some(session_id),
                     state: MtrShellState::new(Ok(())),
+                    steps_scroll_handle: ScrollHandle::new(),
+                    sync_step_from_scroll: false,
                 }
             }
             Err(err) => Self {
                 backend: None,
                 session_id: None,
                 state: MtrShellState::new(Err(err)),
+                steps_scroll_handle: ScrollHandle::new(),
+                sync_step_from_scroll: false,
             },
         }
     }
@@ -1220,7 +1259,9 @@ impl MtrApp {
                 .cursor_pointer()
                 .hover(move |style| style.bg(hover_bg))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    this.sync_step_from_scroll = false;
                     this.state.select_step(step);
+                    this.steps_scroll_handle.scroll_to_top_of_item(step.index());
                     cx.notify();
                 }))
                 .child(
@@ -1462,10 +1503,6 @@ impl MtrApp {
             );
         }
 
-        let (notif_kind, notif_title, notif_subtitle) = status_notification(&self.state.status);
-        let notification =
-            carbon_inline_notification(notif_kind, notif_title, notif_subtitle, theme);
-
         let routes = self
             .state
             .snapshot
@@ -1492,9 +1529,6 @@ impl MtrApp {
         } else {
             div()
                 .id("step1-routes")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
                 .flex()
                 .flex_col()
                 .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
@@ -1533,8 +1567,6 @@ impl MtrApp {
         };
 
         let routes_tile = carbon_tile(TileLayer::Layer01, theme)
-            .flex_1()
-            .min_h_0()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
             .child(
                 div()
@@ -1559,14 +1591,11 @@ impl MtrApp {
             .child(route_list_content);
 
         div()
-            .flex_1()
             .min_w_0()
-            .min_h_0()
             .flex()
             .flex_col()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
             .child(connection_tile)
-            .child(notification)
             .child(routes_tile)
     }
 
@@ -1636,10 +1665,6 @@ impl MtrApp {
                         }),
                     )),
             );
-
-        let (notif_kind, notif_title, notif_subtitle) = status_notification(&self.state.status);
-        let notification =
-            carbon_inline_notification(notif_kind, notif_title, notif_subtitle, theme);
 
         let inspection_content = if let Some(inspection) = &self.state.inspection {
             let line_name = inspection
@@ -1724,9 +1749,6 @@ impl MtrApp {
 
             div()
                 .id("step2-inspection-body")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
                 .flex()
                 .flex_col()
                 .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
@@ -1822,8 +1844,6 @@ impl MtrApp {
         };
 
         let inspection_tile = carbon_tile(TileLayer::Layer01, theme)
-            .flex_1()
-            .min_h_0()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
             .child(
                 div()
@@ -1843,14 +1863,11 @@ impl MtrApp {
             .child(inspection_content);
 
         div()
-            .flex_1()
             .min_w_0()
-            .min_h_0()
             .flex()
             .flex_col()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
             .child(file_tile)
-            .child(notification)
             .child(inspection_tile)
     }
 
@@ -1879,9 +1896,7 @@ impl MtrApp {
                 (Some(_), Some(_)) => unreachable!(),
             };
             return div()
-                .flex_1()
                 .min_w_0()
-                .min_h_0()
                 .flex()
                 .flex_col()
                 .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
@@ -1892,10 +1907,6 @@ impl MtrApp {
                     theme,
                 ));
         };
-
-        let (notif_kind, notif_title, notif_subtitle) = status_notification(&self.state.status);
-        let notification =
-            carbon_inline_notification(notif_kind, notif_title, notif_subtitle, theme);
 
         let route_list_content = if snapshot.routes.is_empty() {
             div()
@@ -1910,9 +1921,6 @@ impl MtrApp {
             let hover_bg = c.layer_hover_01;
             div()
                 .id("step3-routes")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
                 .flex()
                 .flex_col()
                 .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
@@ -1995,7 +2003,6 @@ impl MtrApp {
         let routes_tile = carbon_tile(TileLayer::Layer01, theme)
             .flex_1()
             .min_w_0()
-            .min_h_0()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
             .child(
                 div()
@@ -2199,9 +2206,6 @@ impl MtrApp {
             let hover_bg = c.layer_hover_01;
             div()
                 .id("step3-candidates")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
                 .flex()
                 .flex_col()
                 .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
@@ -2315,9 +2319,7 @@ impl MtrApp {
         };
 
         let candidates_tile = carbon_tile(TileLayer::Layer01, theme)
-            .flex_1()
             .min_w_0()
-            .min_h_0()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
             .child(
                 div()
@@ -2343,27 +2345,22 @@ impl MtrApp {
             .child(candidate_list_content);
 
         div()
-            .flex_1()
             .min_w_0()
-            .min_h_0()
             .flex()
             .flex_col()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
-            .child(notification)
             .child(
                 div()
-                    .flex_1()
                     .min_w_0()
-                    .min_h_0()
                     .flex()
                     .flex_row()
+                    .items_start()
                     .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
                     .child(routes_tile)
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .min_h_0()
                             .flex()
                             .flex_col()
                             .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
@@ -2382,9 +2379,7 @@ impl MtrApp {
 
         let Some(candidate_id) = &self.state.selected_candidate_id else {
             return div()
-                .flex_1()
                 .min_w_0()
-                .min_h_0()
                 .flex()
                 .flex_col()
                 .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
@@ -2466,14 +2461,8 @@ impl MtrApp {
                     )),
             );
 
-        let (notif_kind, notif_title, notif_subtitle) = status_notification(&self.state.status);
-        let notification =
-            carbon_inline_notification(notif_kind, notif_title, notif_subtitle, theme);
-
         let mut result_tile = carbon_tile(TileLayer::Layer01, theme)
-            .flex_1()
             .min_w_0()
-            .min_h_0()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_04));
 
         if let Some(preview) = &self.state.preview {
@@ -2621,9 +2610,6 @@ impl MtrApp {
             } else {
                 div()
                     .id("step4-preview-stops")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
                     .flex()
                     .flex_col()
                     .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
@@ -2727,14 +2713,11 @@ impl MtrApp {
         }
 
         div()
-            .flex_1()
             .min_w_0()
-            .min_h_0()
             .flex()
             .flex_col()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
             .child(action_tile)
-            .child(notification)
             .child(result_tile)
     }
 
@@ -2747,9 +2730,7 @@ impl MtrApp {
 
         let Some(preview) = &self.state.preview else {
             return div()
-                .flex_1()
                 .min_w_0()
-                .min_h_0()
                 .flex()
                 .flex_col()
                 .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
@@ -2823,10 +2804,6 @@ impl MtrApp {
                     )),
             );
 
-        let (notif_kind, notif_title, notif_subtitle) = status_notification(&self.state.status);
-        let notification =
-            carbon_inline_notification(notif_kind, notif_title, notif_subtitle, theme);
-
         let result_tile = if let Some(receipt) = &self.state.save_receipt {
             carbon_tile(TileLayer::Layer01, theme)
                 .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
@@ -2888,26 +2865,24 @@ impl MtrApp {
         };
 
         div()
-            .flex_1()
             .min_w_0()
-            .min_h_0()
             .flex()
             .flex_col()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
             .child(action_tile)
-            .child(notification)
             .child(result_tile)
     }
 
-    fn render_main(&self, cx: &mut Context<Self>) -> Div {
-        let step = self.state.current_step;
+    fn render_step_section(&self, step: AppStep, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = &self.state.theme;
         let c = &theme.colors;
+        let completed = self.state.is_step_completed(step);
 
-        let step_header = div()
+        let mut header_title_row = div()
             .flex()
-            .flex_col()
-            .gap(CarbonSpacing::px(CarbonSpacing::SP_01))
+            .flex_row()
+            .items_center()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
@@ -2915,7 +2890,16 @@ impl MtrApp {
                     .line_height(CarbonTypography::HEADING_03.line_height_px())
                     .text_color(c.text_primary)
                     .child(format!("Step {}: {}", step.number(), step.label())),
-            )
+            );
+        if completed {
+            header_title_row = header_title_row.child(carbon_tag("完了", TagKind::Green, theme));
+        }
+
+        let step_header = div()
+            .flex()
+            .flex_col()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_01))
+            .child(header_title_row)
             .child(
                 div()
                     .text_size(CarbonTypography::BODY_01.font_size_px())
@@ -2932,6 +2916,52 @@ impl MtrApp {
             AppStep::Step5Save => self.render_step5(cx),
         };
 
+        let mut section = div()
+            .id(SharedString::from(format!(
+                "section-step-{}",
+                step.number()
+            )))
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_04));
+
+        if step != AppStep::Step1Mtr {
+            section = section
+                .pt(CarbonSpacing::px(CarbonSpacing::SP_06))
+                .border_t_1()
+                .border_color(c.border_subtle);
+        }
+
+        section.child(step_header).child(body)
+    }
+
+    fn render_main(&self, cx: &mut Context<Self>) -> Div {
+        let theme = &self.state.theme;
+        let (notif_kind, notif_title, notif_subtitle) = status_notification(&self.state.status);
+        let notification =
+            carbon_inline_notification(notif_kind, notif_title, notif_subtitle, theme);
+
+        let mut steps_scroll = div()
+            .id("main-steps")
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.steps_scroll_handle)
+            .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _window, _cx| {
+                this.sync_step_from_scroll = true;
+            }))
+            .flex()
+            .flex_col()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_06))
+            .pr(CarbonSpacing::px(CarbonSpacing::SP_02))
+            .pb(CarbonSpacing::px(CarbonSpacing::SP_07));
+
+        for step in AppStep::ALL {
+            steps_scroll = steps_scroll.child(self.render_step_section(step, cx));
+        }
+
         div()
             .flex_1()
             .min_w_0()
@@ -2940,13 +2970,23 @@ impl MtrApp {
             .flex_col()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
             .p(CarbonSpacing::px(CarbonSpacing::SP_05))
-            .child(step_header)
-            .child(body)
+            .child(notification)
+            .child(steps_scroll)
     }
 }
 
 impl Render for MtrApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.sync_step_from_scroll {
+            let offset_y = f32::from(self.steps_scroll_handle.offset().y);
+            let max_offset_height = f32::from(self.steps_scroll_handle.max_offset().height);
+            let scrolled_step = step_for_scroll_position(
+                self.steps_scroll_handle.top_item(),
+                offset_y,
+                max_offset_height,
+            );
+            self.state.select_step(scrolled_step);
+        }
         let c = self.state.theme.colors;
 
         div()
@@ -4072,5 +4112,30 @@ mod tests {
                 "expected hash mismatch".to_string(),
             )
         );
+    }
+
+    #[test]
+    fn app_step_index_round_trips_for_all_steps() {
+        for (expected_idx, step) in AppStep::ALL.into_iter().enumerate() {
+            assert_eq!(step.index(), expected_idx);
+            assert_eq!(AppStep::from_index(expected_idx), Some(step));
+        }
+        assert_eq!(AppStep::from_index(5), None);
+    }
+
+    #[test]
+    fn step_for_scroll_position_tracks_top_item_and_bottom_clamp() {
+        assert_eq!(step_for_scroll_position(0, 0.0, 500.0), AppStep::Step1Mtr);
+        assert_eq!(
+            step_for_scroll_position(2, -240.0, 500.0),
+            AppStep::Step3RouteMatch
+        );
+        assert_eq!(
+            step_for_scroll_position(3, -498.0, 500.0),
+            AppStep::Step5Save
+        );
+        // max_offset_height が 0（スクロール不要）のときは top_item を尊重する。
+        assert_eq!(step_for_scroll_position(1, 0.0, 0.0), AppStep::Step2Oudia);
+        assert_eq!(step_for_scroll_position(99, 0.0, 500.0), AppStep::Step1Mtr);
     }
 }
