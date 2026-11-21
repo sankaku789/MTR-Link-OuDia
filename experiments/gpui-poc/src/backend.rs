@@ -15,9 +15,10 @@ use futures::{
 };
 use mtr_oudia_application::{
     BusinessError, CandidateId, ConversionService, ConversionSessionStore, EndpointDto,
-    InspectionDto, ManualMappingInput, MtrEndpoint, PreviewDto, PreviewId, RouteCandidateDto,
-    RouteDto, RouteStationDto, SaveReceipt, SessionId, SnapshotDto,
+    InspectionDto, ManualMappingInput, MtrEndpoint, OutboundStatusDto, PreviewDto, PreviewId,
+    RouteCandidateDto, RouteDto, RouteStationDto, SaveReceipt, SessionId, SnapshotDto,
 };
+use mtr_oudia_domain::OperationPolicy;
 use mtr_oudia_infrastructure::{
     FileMinecraftLogProvider, FileOudiaRepository, JsonSettingsRepository, ReqwestMtrApiClient,
     SafeOudiaWriter, WindowsListeningPortProvider,
@@ -174,16 +175,37 @@ enum BackendCommand {
         train_number: Option<String>,
         reply: oneshot::Sender<Result<Vec<RouteCandidateDto>, BusinessError>>,
     },
+    GetOutboundStatus {
+        session_id: SessionId,
+        route_id: String,
+        reply: oneshot::Sender<Result<OutboundStatusDto, BusinessError>>,
+    },
+    MeasureOutboundRuntime {
+        session_id: SessionId,
+        route_id: String,
+        depot_clock: String,
+        utc_offset: String,
+        reply: oneshot::Sender<Result<OutboundStatusDto, BusinessError>>,
+    },
+    SaveManualOutbound {
+        session_id: SessionId,
+        route_id: String,
+        seconds: f64,
+        reply: oneshot::Sender<Result<OutboundStatusDto, BusinessError>>,
+    },
     PreviewConversion {
         session_id: SessionId,
         candidate_id: CandidateId,
         manual: Option<ManualMappingInput>,
+        operation_policy: OperationPolicy,
+        generate_outbound: bool,
         reply: oneshot::Sender<Result<PreviewDto, BusinessError>>,
     },
     SavePreview {
         session_id: SessionId,
         preview_id: PreviewId,
         output: PathBuf,
+        operation_policy: OperationPolicy,
         reply: oneshot::Sender<Result<SaveReceipt, BusinessError>>,
     },
 }
@@ -333,17 +355,66 @@ impl AppBackend {
         })
     }
 
+    /// 選択された路線の保存済み出庫時分状態を取得する。
+    pub fn get_outbound_status(
+        &self,
+        session_id: SessionId,
+        route_id: String,
+    ) -> oneshot::Receiver<Result<OutboundStatusDto, BusinessError>> {
+        self.dispatch(|reply| BackendCommand::GetOutboundStatus {
+            session_id,
+            route_id,
+            reply,
+        })
+    }
+
+    /// 試験列車の車庫発時刻と UTC オフセットから出庫時分を計測して保存する。
+    pub fn measure_outbound_runtime(
+        &self,
+        session_id: SessionId,
+        route_id: String,
+        depot_clock: String,
+        utc_offset: String,
+    ) -> oneshot::Receiver<Result<OutboundStatusDto, BusinessError>> {
+        self.dispatch(|reply| BackendCommand::MeasureOutboundRuntime {
+            session_id,
+            route_id,
+            depot_clock,
+            utc_offset,
+            reply,
+        })
+    }
+
+    /// 出庫時分を手動入力の秒数（小数対応）で保存する。
+    pub fn save_manual_outbound(
+        &self,
+        session_id: SessionId,
+        route_id: String,
+        seconds: f64,
+    ) -> oneshot::Receiver<Result<OutboundStatusDto, BusinessError>> {
+        self.dispatch(|reply| BackendCommand::SaveManualOutbound {
+            session_id,
+            route_id,
+            seconds,
+            reply,
+        })
+    }
+
     /// 選択された照合候補から時刻表プレビューを生成する。
     pub fn preview_conversion(
         &self,
         session_id: SessionId,
         candidate_id: CandidateId,
         manual: Option<ManualMappingInput>,
+        operation_policy: OperationPolicy,
+        generate_outbound: bool,
     ) -> oneshot::Receiver<Result<PreviewDto, BusinessError>> {
         self.dispatch(|reply| BackendCommand::PreviewConversion {
             session_id,
             candidate_id,
             manual,
+            operation_policy,
+            generate_outbound,
             reply,
         })
     }
@@ -354,11 +425,13 @@ impl AppBackend {
         session_id: SessionId,
         preview_id: PreviewId,
         output: PathBuf,
+        operation_policy: OperationPolicy,
     ) -> oneshot::Receiver<Result<SaveReceipt, BusinessError>> {
         self.dispatch(|reply| BackendCommand::SavePreview {
             session_id,
             preview_id,
             output,
+            operation_policy,
             reply,
         })
     }
@@ -546,16 +619,76 @@ fn run_worker_loop(
                         .boxed_local(),
                     );
                 }
-                BackendCommand::PreviewConversion {
+                BackendCommand::GetOutboundStatus {
                     session_id,
-                    candidate_id,
-                    manual,
+                    route_id,
                     reply,
                 } => {
                     in_flight.push(
                         async move {
-                            let result =
-                                service.build_preview(&session_id, Some(&candidate_id), manual);
+                            let result = service.outbound_status(&session_id, &route_id);
+                            let _ = reply.send(result);
+                        }
+                        .boxed_local(),
+                    );
+                }
+                BackendCommand::MeasureOutboundRuntime {
+                    session_id,
+                    route_id,
+                    depot_clock,
+                    utc_offset,
+                    reply,
+                } => {
+                    in_flight.push(
+                        async move {
+                            let result = service
+                                .measure_and_save_outbound(
+                                    &session_id,
+                                    &route_id,
+                                    &depot_clock,
+                                    &utc_offset,
+                                )
+                                .await;
+                            let _ = reply.send(result);
+                        }
+                        .boxed_local(),
+                    );
+                }
+                BackendCommand::SaveManualOutbound {
+                    session_id,
+                    route_id,
+                    seconds,
+                    reply,
+                } => {
+                    in_flight.push(
+                        async move {
+                            let result = service.save_manual_outbound_decimal(
+                                &session_id,
+                                &route_id,
+                                seconds,
+                            );
+                            let _ = reply.send(result);
+                        }
+                        .boxed_local(),
+                    );
+                }
+                BackendCommand::PreviewConversion {
+                    session_id,
+                    candidate_id,
+                    manual,
+                    operation_policy,
+                    generate_outbound,
+                    reply,
+                } => {
+                    in_flight.push(
+                        async move {
+                            let result = service.build_preview_with_outbound(
+                                &session_id,
+                                Some(&candidate_id),
+                                manual,
+                                operation_policy,
+                                generate_outbound,
+                            );
                             let _ = reply.send(result);
                         }
                         .boxed_local(),
@@ -565,16 +698,16 @@ fn run_worker_loop(
                     session_id,
                     preview_id,
                     output,
+                    operation_policy,
                     reply,
                 } => {
                     in_flight.push(
                         async move {
-                            // `build_preview` と同じくデフォルトの `OperationPolicy::Preserve` で保存する。
                             let result = service.save_conversion(
                                 &session_id,
                                 &preview_id,
                                 &output,
-                                Default::default(),
+                                operation_policy,
                             );
                             let _ = reply.send(result);
                         }

@@ -15,6 +15,7 @@ unicode-segmentation = "1"
 
 # async bridge 検証用。既存の application / infrastructure をそのまま呼ぶ。
 mtr-oudia-application = { path = "../../crates/mtr-oudia-application" }
+mtr-oudia-domain = { path = "../../crates/mtr-oudia-domain" }
 mtr-oudia-infrastructure = { path = "../../crates/mtr-oudia-infrastructure" }
 futures = "0.3"
 tokio = { version = "1", features = ["rt", "net", "time"] }

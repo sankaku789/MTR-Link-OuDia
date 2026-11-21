@@ -103,8 +103,28 @@ impl TextInput {
     }
 
     #[allow(dead_code)]
+    pub fn with_text(mut self, text: impl Into<SharedString>) -> Self {
+        let text = text.into();
+        let len = text.len();
+        self.content = text;
+        self.selected_range = len..len;
+        self
+    }
+
+    #[allow(dead_code)]
     pub fn set_style(&mut self, style: TextInputStyle, cx: &mut Context<Self>) {
         self.style = style;
+        cx.notify();
+    }
+
+    #[allow(dead_code)]
+    pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let text = text.into();
+        let len = text.len();
+        self.content = text;
+        self.selected_range = len..len;
+        self.selection_reversed = false;
+        self.marked_range = None;
         cx.notify();
     }
 

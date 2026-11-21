@@ -17,9 +17,10 @@ use gpui_poc::carbon::{
 use gpui_poc::text_input::{TextInput, TextInputStyle, bind_keys as bind_text_input_keys};
 use mtr_oudia_application::{
     BusinessError, CandidateId, EndpointDto, InspectionDto, ManualMappingInput, MtrEndpoint,
-    PreviewDto, PreviewId, RouteCandidateDto, RouteDto, SaveReceipt, SessionId, SnapshotDto,
-    StationMappingDto, StationSlotDto, TemplateDto,
+    OutboundRuntimeSource, OutboundStatusDto, PreviewDto, PreviewId, RouteCandidateDto, RouteDto,
+    SaveReceipt, SessionId, SnapshotDto, StationMappingDto, StationSlotDto, TemplateDto,
 };
+use mtr_oudia_domain::OperationPolicy;
 
 const TRANSPARENT: Rgba = Rgba {
     r: 0.0,
@@ -170,6 +171,16 @@ pub enum AppStatus {
         title: String,
         detail: String,
     },
+    MeasuringOutbound,
+    OutboundMeasured {
+        duration_label: String,
+        is_manual: bool,
+        valid: bool,
+    },
+    OutboundError {
+        title: String,
+        detail: String,
+    },
     Previewing,
     PreviewSuccess {
         stop_count: usize,
@@ -201,6 +212,7 @@ impl AppStatus {
                 | Self::RefreshingCache { .. }
                 | Self::InspectingOudia { .. }
                 | Self::FindingCandidates
+                | Self::MeasuringOutbound
                 | Self::Previewing
                 | Self::Saving { .. }
         )
@@ -224,6 +236,10 @@ impl AppStatus {
 
     pub fn is_finding_candidates(&self) -> bool {
         matches!(self, Self::FindingCandidates)
+    }
+
+    pub fn is_measuring_outbound(&self) -> bool {
+        matches!(self, Self::MeasuringOutbound)
     }
 
     pub fn is_previewing(&self) -> bool {
@@ -360,6 +376,40 @@ pub fn status_notification(status: &AppStatus) -> (NotificationKind, String, Str
             }
         }
         AppStatus::CandidatesError { title, detail } => {
+            (NotificationKind::Error, title.clone(), detail.clone())
+        }
+        AppStatus::MeasuringOutbound => (
+            NotificationKind::Info,
+            "出庫時分を計測中".to_string(),
+            "MTR API から試験列車の出庫時分を取得・保存しています...".to_string(),
+        ),
+        AppStatus::OutboundMeasured {
+            duration_label,
+            is_manual,
+            valid,
+        } => {
+            if *valid {
+                let title = if *is_manual {
+                    "出庫時分を手動保存しました"
+                } else {
+                    "出庫時分を計測しました"
+                };
+                (
+                    NotificationKind::Success,
+                    title.to_string(),
+                    format!("出庫 → 始発駅所要時間: {duration_label}"),
+                )
+            } else {
+                (
+                    NotificationKind::Warning,
+                    "出庫時分を保存しました（要確認）".to_string(),
+                    format!(
+                        "出庫 → 始発駅所要時間: {duration_label}（現在の路線構成と一致するか確認してください）"
+                    ),
+                )
+            }
+        }
+        AppStatus::OutboundError { title, detail } => {
             (NotificationKind::Error, title.clone(), detail.clone())
         }
         AppStatus::Previewing => (
@@ -500,6 +550,89 @@ fn preview_button_label(previewing: bool) -> &'static str {
         "生成中..."
     } else {
         "プレビュー生成"
+    }
+}
+
+fn outbound_measure_button_label(measuring: bool) -> &'static str {
+    if measuring {
+        "計測中..."
+    } else {
+        "出庫時分を計測"
+    }
+}
+
+fn generate_outbound_button_label(enabled: bool) -> &'static str {
+    if enabled {
+        "出庫時分を含める: ON"
+    } else {
+        "出庫時分を含める: OFF"
+    }
+}
+
+/// `PreviewDto.policy_choices` の文字列を [`OperationPolicy`] へ変換する。
+pub fn operation_policy_from_choice(choice: &str) -> Option<OperationPolicy> {
+    match choice {
+        "preserve" => Some(OperationPolicy::Preserve),
+        "remove_target_train" => Some(OperationPolicy::RemoveTargetTrain),
+        _ => None,
+    }
+}
+
+/// [`OperationPolicy`] の画面表示ラベルを返す。
+pub fn operation_policy_label(policy: OperationPolicy) -> &'static str {
+    match policy {
+        OperationPolicy::Preserve => "元のまま保持 (Preserve)",
+        OperationPolicy::RemoveTargetTrain => "対象列車から削除 (RemoveTargetTrain)",
+        OperationPolicy::Unselected => "未選択 (Unselected)",
+    }
+}
+
+fn operation_policy_short_label(policy: OperationPolicy) -> &'static str {
+    match policy {
+        OperationPolicy::Preserve => "Preserve",
+        OperationPolicy::RemoveTargetTrain => "RemoveTargetTrain",
+        OperationPolicy::Unselected => "Unselected",
+    }
+}
+
+fn outbound_source_label(source: OutboundRuntimeSource) -> &'static str {
+    match source {
+        OutboundRuntimeSource::Measured => "API 計測",
+        OutboundRuntimeSource::Manual => "手動入力",
+    }
+}
+
+/// 手動入力の出庫時分（秒・小数対応）を検証して `f64` へ変換する。
+pub fn parse_manual_outbound_seconds(raw: &str) -> Result<f64, BusinessError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(BusinessError {
+            kind: mtr_oudia_application::BusinessErrorKind::Validation,
+            message: "出庫時分（秒数）を入力してください".to_string(),
+            detail: None,
+        });
+    }
+    let seconds: f64 = trimmed.parse().map_err(|_| BusinessError {
+        kind: mtr_oudia_application::BusinessErrorKind::Validation,
+        message: "出庫時分は 0 以上の数値（秒）で入力してください".to_string(),
+        detail: Some(format!("入力値: {trimmed}")),
+    })?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(BusinessError {
+            kind: mtr_oudia_application::BusinessErrorKind::Validation,
+            message: "出庫時分は 0 以上の有限な数値（秒）で入力してください".to_string(),
+            detail: Some(format!("入力値: {trimmed}")),
+        });
+    }
+    Ok(seconds)
+}
+
+fn normalize_utc_offset_input(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        "+09:00".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -716,7 +849,11 @@ struct MtrShellState {
     selected_train_type: Option<usize>,
     route_candidates: Vec<RouteCandidateDto>,
     selected_candidate_id: Option<CandidateId>,
+    searched_train_number: Option<String>,
     manual_station_mappings: Option<Vec<StationMappingDto>>,
+    outbound_status: Option<OutboundStatusDto>,
+    generate_outbound: bool,
+    operation_policy: OperationPolicy,
     preview: Option<PreviewDto>,
     save_receipt: Option<SaveReceipt>,
     status: AppStatus,
@@ -749,7 +886,11 @@ impl MtrShellState {
             selected_train_type: None,
             route_candidates: Vec::new(),
             selected_candidate_id: None,
+            searched_train_number: None,
             manual_station_mappings: None,
+            outbound_status: None,
+            generate_outbound: false,
+            operation_policy: OperationPolicy::Preserve,
             preview: None,
             save_receipt: None,
             status,
@@ -796,6 +937,7 @@ impl MtrShellState {
     fn clear_candidate_selection(&mut self) {
         self.route_candidates.clear();
         self.selected_candidate_id = None;
+        self.searched_train_number = None;
         self.manual_station_mappings = None;
         self.preview = None;
         self.save_receipt = None;
@@ -803,12 +945,16 @@ impl MtrShellState {
 
     fn clear_step3_for_snapshot_change(&mut self) {
         self.selected_route_id = None;
+        self.outbound_status = None;
+        self.generate_outbound = false;
+        self.operation_policy = OperationPolicy::Preserve;
         self.clear_candidate_selection();
     }
 
     fn clear_step3_for_inspection_change(&mut self) {
         self.selected_diagram_index = None;
         self.selected_train_type = None;
+        self.operation_policy = OperationPolicy::Preserve;
         self.clear_candidate_selection();
     }
 
@@ -954,6 +1100,9 @@ impl MtrShellState {
         }
         if self.selected_route_id.as_deref() != Some(route_id.as_str()) {
             self.selected_route_id = Some(route_id);
+            self.outbound_status = None;
+            self.generate_outbound = false;
+            self.operation_policy = OperationPolicy::Preserve;
             self.clear_candidate_selection();
         }
         true
@@ -1084,6 +1233,18 @@ impl MtrShellState {
         }
     }
 
+    fn apply_candidates_result_with_train_number(
+        &mut self,
+        train_number: Option<String>,
+        result: Result<Vec<RouteCandidateDto>, BusinessError>,
+    ) {
+        let succeeded = result.is_ok();
+        self.apply_candidates_result(result);
+        if succeeded {
+            self.searched_train_number = train_number;
+        }
+    }
+
     fn apply_candidates_result(&mut self, result: Result<Vec<RouteCandidateDto>, BusinessError>) {
         match result {
             Ok(candidates) => {
@@ -1106,6 +1267,96 @@ impl MtrShellState {
             Err(err) => {
                 let (title, detail) = format_business_error(&err);
                 self.status = AppStatus::CandidatesError { title, detail };
+            }
+        }
+    }
+
+    fn set_operation_policy(&mut self, policy: OperationPolicy) -> bool {
+        if self.status.is_busy() || self.status.is_init_failed() {
+            return false;
+        }
+        if self.operation_policy != policy {
+            self.operation_policy = policy;
+            self.preview = None;
+            self.save_receipt = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn set_generate_outbound(&mut self, enabled: bool) -> bool {
+        if self.status.is_busy() || self.status.is_init_failed() {
+            return false;
+        }
+        if self.generate_outbound != enabled {
+            self.generate_outbound = enabled;
+            self.preview = None;
+            self.save_receipt = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn toggle_generate_outbound(&mut self) -> bool {
+        self.set_generate_outbound(!self.generate_outbound)
+    }
+
+    fn apply_outbound_status_loaded(
+        &mut self,
+        result: Result<OutboundStatusDto, BusinessError>,
+        notify_error: bool,
+    ) {
+        match result {
+            Ok(dto) => {
+                let changed = self.outbound_status.as_ref().is_some_and(|prev| {
+                    prev.valid != dto.valid
+                        || prev.setting != dto.setting
+                        || prev.duration_label != dto.duration_label
+                        || prev.message != dto.message
+                }) || (!dto.valid && self.generate_outbound);
+                if !dto.valid {
+                    self.generate_outbound = false;
+                }
+                if changed {
+                    self.preview = None;
+                    self.save_receipt = None;
+                }
+                self.outbound_status = Some(dto);
+            }
+            Err(err) if notify_error => {
+                let (title, detail) = format_business_error(&err);
+                self.status = AppStatus::OutboundError { title, detail };
+            }
+            Err(_) => {}
+        }
+    }
+
+    fn apply_outbound_result(
+        &mut self,
+        result: Result<OutboundStatusDto, BusinessError>,
+        is_manual: bool,
+    ) {
+        match result {
+            Ok(dto) => {
+                let duration_label = dto.duration_label.clone();
+                let valid = dto.valid;
+                if !valid {
+                    self.generate_outbound = false;
+                }
+                self.outbound_status = Some(dto);
+                self.preview = None;
+                self.save_receipt = None;
+                self.status = AppStatus::OutboundMeasured {
+                    duration_label,
+                    is_manual,
+                    valid,
+                };
+            }
+            Err(err) => {
+                let (title, detail) = format_business_error(&err);
+                self.status = AppStatus::OutboundError { title, detail };
             }
         }
     }
@@ -1150,6 +1401,10 @@ struct MtrApp {
     session_id: Option<SessionId>,
     state: MtrShellState,
     train_number_input: Entity<TextInput>,
+    step4_train_number_input: Entity<TextInput>,
+    depot_clock_input: Entity<TextInput>,
+    utc_offset_input: Entity<TextInput>,
+    manual_outbound_seconds_input: Entity<TextInput>,
     steps_scroll_handle: ScrollHandle,
     sync_step_from_scroll: bool,
     _appearance_subscription: Subscription,
@@ -1179,12 +1434,29 @@ impl MtrApp {
         let train_number_input = cx.new(|cx| {
             TextInput::new("列車番号（任意・指定時は全ダイヤ横断）", cx).with_style(input_style)
         });
+        let step4_train_number_input = cx.new(|cx| {
+            TextInput::new("列車番号（精密入力用・空欄で 10:00 固定）", cx).with_style(input_style)
+        });
+        let depot_clock_input = cx.new(|cx| {
+            TextInput::new("車庫発時刻 (HH:mm:ss 例: 12:00:00)", cx).with_style(input_style)
+        });
+        let utc_offset_input = cx.new(|cx| {
+            TextInput::new("UTCオフセット (例: +09:00)", cx)
+                .with_text("+09:00")
+                .with_style(input_style)
+        });
+        let manual_outbound_seconds_input =
+            cx.new(|cx| TextInput::new("手動入力秒数 (例: 13.5)", cx).with_style(input_style));
 
         Self {
             backend,
             session_id,
             state,
             train_number_input,
+            step4_train_number_input,
+            depot_clock_input,
+            utc_offset_input,
+            manual_outbound_seconds_input,
             steps_scroll_handle: ScrollHandle::new(),
             sync_step_from_scroll: false,
             _appearance_subscription: appearance_subscription,
@@ -1193,8 +1465,15 @@ impl MtrApp {
 
     fn sync_input_theme(&self, cx: &mut Context<Self>) {
         let style = carbon_text_input_style(&self.state.theme);
-        self.train_number_input
-            .update(cx, |input, cx| input.set_style(style, cx));
+        for input in [
+            &self.train_number_input,
+            &self.step4_train_number_input,
+            &self.depot_clock_input,
+            &self.utc_offset_input,
+            &self.manual_outbound_seconds_input,
+        ] {
+            input.update(cx, |field, cx| field.set_style(style, cx));
+        }
     }
 
     fn start_detect(&mut self, cx: &mut Context<Self>) {
@@ -1429,6 +1708,35 @@ impl MtrApp {
     }
 
     fn start_find_candidates(&mut self, cx: &mut Context<Self>) {
+        let train_number = normalize_train_number_input(self.train_number_input.read(cx).text());
+        let synced_text = train_number.clone().unwrap_or_default();
+        self.step4_train_number_input
+            .update(cx, |input, cx| input.set_text(synced_text, cx));
+        self.start_find_candidates_with_train_number(train_number, cx);
+    }
+
+    fn start_find_candidates_from_step4(&mut self, cx: &mut Context<Self>) {
+        let train_number =
+            normalize_train_number_input(self.step4_train_number_input.read(cx).text());
+        let synced_text = train_number.clone().unwrap_or_default();
+        self.train_number_input
+            .update(cx, |input, cx| input.set_text(synced_text, cx));
+        self.start_find_candidates_with_train_number(train_number, cx);
+    }
+
+    fn switch_to_normal_mode_from_step4(&mut self, cx: &mut Context<Self>) {
+        self.train_number_input
+            .update(cx, |input, cx| input.clear(cx));
+        self.step4_train_number_input
+            .update(cx, |input, cx| input.clear(cx));
+        self.start_find_candidates_with_train_number(None, cx);
+    }
+
+    fn start_find_candidates_with_train_number(
+        &mut self,
+        train_number: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if self.state.status.is_busy() || self.state.status.is_init_failed() {
             return;
         }
@@ -1446,7 +1754,7 @@ impl MtrApp {
 
         let diagram_index = self.state.selected_diagram_index;
         let train_type = self.state.selected_train_type;
-        let train_number = normalize_train_number_input(self.train_number_input.read(cx).text());
+        let searched_number = train_number.clone();
         self.state.status = AppStatus::FindingCandidates;
         cx.notify();
 
@@ -1461,10 +1769,151 @@ impl MtrApp {
             let received = rx.await;
             this.update(cx, |this, cx| {
                 match received {
-                    Ok(result) => this.state.apply_candidates_result(result),
+                    Ok(result) => this
+                        .state
+                        .apply_candidates_result_with_train_number(searched_number, result),
                     Err(_) => {
                         this.state.status = AppStatus::CandidatesError {
                             title: "候補検索が中断されました".to_string(),
+                            detail: "バックグラウンド処理との通信が終了しました。".to_string(),
+                        };
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_fetch_outbound_status(&mut self, notify_error: bool, cx: &mut Context<Self>) {
+        if self.state.status.is_init_failed() {
+            return;
+        }
+        let Some(route_id) = self.state.selected_route_id.clone() else {
+            return;
+        };
+        let (Some(backend), Some(session_id)) = (&self.backend, self.session_id.clone()) else {
+            return;
+        };
+
+        let rx = backend.get_outbound_status(session_id, route_id.clone());
+        cx.spawn(async move |this, cx| {
+            let received = rx.await;
+            this.update(cx, |this, cx| {
+                if this.state.selected_route_id.as_deref() != Some(route_id.as_str()) {
+                    return;
+                }
+                match received {
+                    Ok(result) => this
+                        .state
+                        .apply_outbound_status_loaded(result, notify_error),
+                    Err(_) if notify_error => {
+                        this.state.status = AppStatus::OutboundError {
+                            title: "出庫時分の取得が中断されました".to_string(),
+                            detail: "バックグラウンド処理との通信が終了しました。".to_string(),
+                        };
+                    }
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_measure_outbound(&mut self, cx: &mut Context<Self>) {
+        if self.state.status.is_busy() || self.state.status.is_init_failed() {
+            return;
+        }
+        let Some(route_id) = self.state.selected_route_id.clone() else {
+            self.state.status = AppStatus::OutboundError {
+                title: "MTR 路線が未選択です".to_string(),
+                detail: "Step 3 で対象の MTR 路線を選択してください。".to_string(),
+            };
+            cx.notify();
+            return;
+        };
+        let (Some(backend), Some(session_id)) = (&self.backend, self.session_id.clone()) else {
+            return;
+        };
+
+        let depot_clock = self.depot_clock_input.read(cx).text().trim().to_string();
+        let utc_offset = normalize_utc_offset_input(self.utc_offset_input.read(cx).text());
+        self.state.status = AppStatus::MeasuringOutbound;
+        cx.notify();
+
+        let rx =
+            backend.measure_outbound_runtime(session_id, route_id.clone(), depot_clock, utc_offset);
+        cx.spawn(async move |this, cx| {
+            let received = rx.await;
+            this.update(cx, |this, cx| {
+                if this.state.selected_route_id.as_deref() != Some(route_id.as_str()) {
+                    this.state.status = AppStatus::Idle;
+                    cx.notify();
+                    return;
+                }
+                match received {
+                    Ok(result) => this.state.apply_outbound_result(result, false),
+                    Err(_) => {
+                        this.state.status = AppStatus::OutboundError {
+                            title: "出庫時分の計測が中断されました".to_string(),
+                            detail: "バックグラウンド処理との通信が終了しました。".to_string(),
+                        };
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_save_manual_outbound(&mut self, cx: &mut Context<Self>) {
+        if self.state.status.is_busy() || self.state.status.is_init_failed() {
+            return;
+        }
+        let Some(route_id) = self.state.selected_route_id.clone() else {
+            self.state.status = AppStatus::OutboundError {
+                title: "MTR 路線が未選択です".to_string(),
+                detail: "Step 3 で対象の MTR 路線を選択してください。".to_string(),
+            };
+            cx.notify();
+            return;
+        };
+        let seconds =
+            match parse_manual_outbound_seconds(self.manual_outbound_seconds_input.read(cx).text())
+            {
+                Ok(seconds) => seconds,
+                Err(err) => {
+                    let (title, detail) = format_business_error(&err);
+                    self.state.status = AppStatus::OutboundError { title, detail };
+                    cx.notify();
+                    return;
+                }
+            };
+        let (Some(backend), Some(session_id)) = (&self.backend, self.session_id.clone()) else {
+            return;
+        };
+
+        self.state.status = AppStatus::MeasuringOutbound;
+        cx.notify();
+
+        let rx = backend.save_manual_outbound(session_id, route_id.clone(), seconds);
+        cx.spawn(async move |this, cx| {
+            let received = rx.await;
+            this.update(cx, |this, cx| {
+                if this.state.selected_route_id.as_deref() != Some(route_id.as_str()) {
+                    this.state.status = AppStatus::Idle;
+                    cx.notify();
+                    return;
+                }
+                match received {
+                    Ok(result) => this.state.apply_outbound_result(result, true),
+                    Err(_) => {
+                        this.state.status = AppStatus::OutboundError {
+                            title: "出庫時分の手動保存が中断されました".to_string(),
                             detail: "バックグラウンド処理との通信が終了しました。".to_string(),
                         };
                     }
@@ -1497,10 +1946,18 @@ impl MtrApp {
             .manual_station_mappings
             .clone()
             .map(|station_mappings| ManualMappingInput { station_mappings });
+        let operation_policy = self.state.operation_policy;
+        let generate_outbound = self.state.generate_outbound;
         self.state.status = AppStatus::Previewing;
         cx.notify();
 
-        let rx = backend.preview_conversion(session_id, candidate_id, manual);
+        let rx = backend.preview_conversion(
+            session_id,
+            candidate_id,
+            manual,
+            operation_policy,
+            generate_outbound,
+        );
         cx.spawn(async move |this, cx| {
             let received = rx.await;
             this.update(cx, |this, cx| {
@@ -1567,12 +2024,13 @@ impl MtrApp {
             return;
         };
 
+        let operation_policy = self.state.operation_policy;
         self.state.status = AppStatus::Saving {
             path: output_path.display().to_string(),
         };
         cx.notify();
 
-        let rx = backend.save_preview(session_id, preview_id, output_path);
+        let rx = backend.save_preview(session_id, preview_id, output_path, operation_policy);
         cx.spawn(async move |this, cx| {
             let received = rx.await;
             this.update(cx, |this, cx| {
@@ -2467,6 +2925,7 @@ impl MtrApp {
                             .hover(move |style| style.bg(hover_bg))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                                 if this.state.select_route(route_id.clone()) {
+                                    this.start_fetch_outbound_status(false, cx);
                                     cx.notify();
                                 }
                             }))
@@ -3124,6 +3583,7 @@ impl MtrApp {
         let busy = self.state.status.is_busy();
         let disabled = busy || self.state.status.is_init_failed();
         let previewing = self.state.status.is_previewing();
+        let measuring_outbound = self.state.status.is_measuring_outbound();
 
         let Some(candidate_id) = &self.state.selected_candidate_id else {
             return div()
@@ -3144,6 +3604,12 @@ impl MtrApp {
         } else {
             ("未生成", TagKind::CoolGray)
         };
+        let is_precision_active = self
+            .state
+            .preview
+            .as_ref()
+            .map(|p| p.precision_mode)
+            .unwrap_or_else(|| self.state.searched_train_number.is_some());
 
         let mut action_info = div()
             .flex_1()
@@ -3155,8 +3621,9 @@ impl MtrApp {
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
                     .items_center()
-                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
@@ -3165,7 +3632,41 @@ impl MtrApp {
                             .text_color(c.text_primary)
                             .child("時刻表プレビュー生成"),
                     )
-                    .child(carbon_tag(preview_tag_label, preview_tag_kind, theme)),
+                    .child(carbon_tag(preview_tag_label, preview_tag_kind, theme))
+                    .child(carbon_tag(
+                        if is_precision_active {
+                            "精密入力"
+                        } else {
+                            "10:00 固定"
+                        },
+                        if is_precision_active {
+                            TagKind::Blue
+                        } else {
+                            TagKind::CoolGray
+                        },
+                        theme,
+                    ))
+                    .child(carbon_tag(
+                        format!(
+                            "Policy: {}",
+                            operation_policy_short_label(self.state.operation_policy)
+                        ),
+                        TagKind::CoolGray,
+                        theme,
+                    ))
+                    .child(carbon_tag(
+                        if self.state.generate_outbound {
+                            "出区: ON"
+                        } else {
+                            "出区: OFF"
+                        },
+                        if self.state.generate_outbound {
+                            TagKind::Green
+                        } else {
+                            TagKind::CoolGray
+                        },
+                        theme,
+                    )),
             )
             .child(info_row("選択中候補 ID:", candidate_id.0.clone(), theme));
 
@@ -3207,6 +3708,415 @@ impl MtrApp {
                             this.start_preview(cx);
                         }),
                     )),
+            );
+
+        // 精密入力モード設定パネル
+        let (precision_badge_label, precision_badge_kind) =
+            if let Some(number) = &self.state.searched_train_number {
+                (format!("有効 (列車番号: {number})"), TagKind::Blue)
+            } else if self
+                .state
+                .preview
+                .as_ref()
+                .is_some_and(|preview| preview.precision_mode)
+            {
+                ("有効 (精密入力)".to_string(), TagKind::Blue)
+            } else {
+                ("通常モード (10:00 固定)".to_string(), TagKind::CoolGray)
+            };
+        let step4_train_empty = self
+            .step4_train_number_input
+            .read(cx)
+            .text()
+            .trim()
+            .is_empty();
+        let normal_reset_disabled =
+            disabled || (self.state.searched_train_number.is_none() && step4_train_empty);
+
+        let precision_tile = carbon_tile(TileLayer::Layer01, theme)
+            .min_w_0()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_size(CarbonTypography::HEADING_02.font_size_px())
+                                    .line_height(CarbonTypography::HEADING_02.line_height_px())
+                                    .text_color(c.text_primary)
+                                    .child("精密入力モード（元発時刻・番線更新）"),
+                            )
+                            .child(carbon_tag(
+                                precision_badge_label,
+                                precision_badge_kind,
+                                theme,
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(CarbonTypography::LABEL_01.font_size_px())
+                    .line_height(CarbonTypography::LABEL_01.line_height_px())
+                    .text_color(c.text_secondary)
+                    .child(
+                        "列車番号を指定して照合すると、元ファイルの始発駅発時刻を基準時刻として採用し、MTR ホーム名と駅番線略称の一致で番線も更新します。空欄に戻すと 10:00 固定・番線保持になります。",
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .min_w_0()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(220.0))
+                            .child(self.step4_train_number_input.clone()),
+                    )
+                    .child(carbon_button(
+                        "step4-apply-precision",
+                        "列車番号で再照合",
+                        ButtonKind::Secondary,
+                        disabled || self.state.selected_route_id.is_none(),
+                        theme,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.start_find_candidates_from_step4(cx);
+                        }),
+                    ))
+                    .child(carbon_button(
+                        "step4-reset-normal-mode",
+                        "10:00 固定に戻す",
+                        ButtonKind::Ghost,
+                        normal_reset_disabled || self.state.selected_route_id.is_none(),
+                        theme,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.switch_to_normal_mode_from_step4(cx);
+                        }),
+                    )),
+            );
+
+        // OperationPolicy 切替パネル
+        let mut policy_variants: Vec<OperationPolicy> = self
+            .state
+            .preview
+            .as_ref()
+            .map(|preview| {
+                preview
+                    .policy_choices
+                    .iter()
+                    .filter_map(|choice| operation_policy_from_choice(choice))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if policy_variants.is_empty() {
+            policy_variants = vec![
+                OperationPolicy::Preserve,
+                OperationPolicy::RemoveTargetTrain,
+            ];
+        }
+        let policy_buttons = policy_variants.into_iter().map(|policy| {
+            let is_selected = self.state.operation_policy == policy;
+            carbon_button(
+                SharedString::from(format!(
+                    "step4-policy-{}",
+                    operation_policy_short_label(policy)
+                )),
+                operation_policy_label(policy),
+                if is_selected {
+                    ButtonKind::Primary
+                } else {
+                    ButtonKind::Secondary
+                },
+                disabled,
+                theme,
+                cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    if this.state.set_operation_policy(policy) {
+                        cx.notify();
+                    }
+                }),
+            )
+        });
+
+        let operation_note = if self
+            .state
+            .preview
+            .as_ref()
+            .is_some_and(|preview| !preview.operation_present)
+        {
+            "この OuDia ファイルには Operation 定義がありません（選択内容は保存時の検証・計画に引き継がれます）。方針切替時は既存の保存状態がクリアされます。"
+        } else {
+            "既存 Operation の扱いを切り替えます。方針を切り替えると Step 5 の保存状態とプレビューがクリアされるため、再度「プレビュー生成」を実行してください。"
+        };
+
+        let operation_tile = carbon_tile(TileLayer::Layer01, theme)
+            .min_w_0()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_size(CarbonTypography::HEADING_02.font_size_px())
+                                    .line_height(CarbonTypography::HEADING_02.line_height_px())
+                                    .text_color(c.text_primary)
+                                    .child("Operation 方針"),
+                            )
+                            .child(carbon_tag(
+                                operation_policy_short_label(self.state.operation_policy),
+                                TagKind::Blue,
+                                theme,
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .children(policy_buttons),
+            )
+            .child(
+                div()
+                    .text_size(CarbonTypography::LABEL_01.font_size_px())
+                    .line_height(CarbonTypography::LABEL_01.line_height_px())
+                    .text_color(c.text_secondary)
+                    .child(operation_note),
+            );
+
+        // 出庫時分計測・出区設定パネル
+        let selected_route = self.state.selected_route();
+        let outbound_valid = self
+            .state
+            .outbound_status
+            .as_ref()
+            .is_some_and(|status| status.valid);
+        let (outbound_tag_label, outbound_tag_kind) = match &self.state.outbound_status {
+            Some(status) if status.valid => {
+                (format!("有効: {}", status.duration_label), TagKind::Green)
+            }
+            Some(_) => ("要再計測".to_string(), TagKind::WarmGray),
+            None => ("未計測".to_string(), TagKind::CoolGray),
+        };
+        let first_station_name = self
+            .state
+            .outbound_status
+            .as_ref()
+            .map(|status| status.first_station_name.as_str())
+            .or_else(|| {
+                selected_route
+                    .and_then(|route| route.stations.first())
+                    .map(|stop| stop.station_name.as_str())
+            })
+            .unwrap_or("未取得");
+        let first_platform_name = self
+            .state
+            .outbound_status
+            .as_ref()
+            .map(|status| status.first_platform_name.as_str())
+            .or_else(|| {
+                selected_route
+                    .and_then(|route| route.stations.first())
+                    .map(|stop| stop.platform_name.as_str())
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or("記載なし");
+        let first_dwell_display = selected_route
+            .and_then(|route| route.stations.first())
+            .map(|stop| format_dwell_seconds(stop.dwell_millis))
+            .unwrap_or_else(|| "-".to_string());
+        let outbound_duration_display = self
+            .state
+            .outbound_status
+            .as_ref()
+            .map(|status| status.duration_label.clone())
+            .unwrap_or_else(|| "未測定".to_string());
+        let outbound_source_display = self
+            .state
+            .outbound_status
+            .as_ref()
+            .and_then(|status| status.setting.as_ref())
+            .map(|setting| outbound_source_label(setting.source).to_string())
+            .unwrap_or_else(|| "-".to_string());
+
+        let toggle_outbound_disabled =
+            disabled || (!outbound_valid && !self.state.generate_outbound);
+        let route_missing = self.state.selected_route_id.is_none();
+
+        let mut outbound_tile = carbon_tile(TileLayer::Layer01, theme)
+            .min_w_0()
+            .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_size(CarbonTypography::HEADING_02.font_size_px())
+                                    .line_height(CarbonTypography::HEADING_02.line_height_px())
+                                    .text_color(c.text_primary)
+                                    .child("出庫時分計測・出区設定"),
+                            )
+                            .child(carbon_tag(outbound_tag_label, outbound_tag_kind, theme)),
+                    )
+                    .child(carbon_button(
+                        "step4-toggle-generate-outbound",
+                        generate_outbound_button_label(self.state.generate_outbound),
+                        if self.state.generate_outbound {
+                            ButtonKind::Primary
+                        } else {
+                            ButtonKind::Secondary
+                        },
+                        toggle_outbound_disabled,
+                        theme,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            if this.state.toggle_generate_outbound() {
+                                cx.notify();
+                            }
+                        }),
+                    )),
+            )
+            .child(info_row(
+                "始発駅 / ホーム:",
+                format!("{first_station_name} / {first_platform_name}"),
+                theme,
+            ))
+            .child(info_row(
+                "出庫 → 始発駅所要時間:",
+                format!("{outbound_duration_display}（始発駅停車: {first_dwell_display} / 方式: {outbound_source_display}）"),
+                theme,
+            ));
+
+        if let Some(message) = self
+            .state
+            .outbound_status
+            .as_ref()
+            .and_then(|status| status.message.as_ref())
+        {
+            outbound_tile = outbound_tile.child(carbon_inline_notification(
+                NotificationKind::Warning,
+                "出庫時分の確認が必要です",
+                message.clone(),
+                theme,
+            ));
+        }
+
+        outbound_tile = outbound_tile
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .min_w_0()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(200.0))
+                            .child(self.depot_clock_input.clone()),
+                    )
+                    .child(
+                        div()
+                            .w(px(140.0))
+                            .flex_shrink_0()
+                            .child(self.utc_offset_input.clone()),
+                    )
+                    .child(carbon_button(
+                        "step4-measure-outbound",
+                        outbound_measure_button_label(measuring_outbound),
+                        ButtonKind::Secondary,
+                        disabled || route_missing,
+                        theme,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.start_measure_outbound(cx);
+                        }),
+                    ))
+                    .child(carbon_button(
+                        "step4-refresh-outbound-status",
+                        "保存済み状態を取得",
+                        ButtonKind::Ghost,
+                        disabled || route_missing,
+                        theme,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.start_fetch_outbound_status(true, cx);
+                        }),
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .min_w_0()
+                    .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(200.0))
+                            .child(self.manual_outbound_seconds_input.clone()),
+                    )
+                    .child(carbon_button(
+                        "step4-save-manual-outbound",
+                        "手動秒数を保存",
+                        ButtonKind::Secondary,
+                        disabled || route_missing,
+                        theme,
+                        cx.listener(|this, _: &ClickEvent, _window, cx| {
+                            this.start_save_manual_outbound(cx);
+                        }),
+                    )),
+            )
+            .child(
+                div()
+                    .text_size(CarbonTypography::LABEL_01.font_size_px())
+                    .line_height(CarbonTypography::LABEL_01.line_height_px())
+                    .text_color(c.text_secondary)
+                    .child(if outbound_valid {
+                        "出区時刻 = 始発駅発 − 始発駅停車時間 − 出庫時分。「出庫時分を含める」を切り替えた後はプレビューを再生成してください。"
+                    } else {
+                        "車庫発時刻 (HH:mm:ss) から API 計測するか、秒数を手動保存すると「出庫時分を含める」を ON にできます。"
+                    }),
             );
 
         let mut result_tile = carbon_tile(TileLayer::Layer01, theme)
@@ -3300,6 +4210,53 @@ impl MtrApp {
                 );
             }
 
+            if let Some(outbound_preview) = &preview.outbound {
+                let first_dwell = preview
+                    .stops
+                    .first()
+                    .map(|stop| format_dwell_seconds(stop.dwell_millis))
+                    .unwrap_or_else(|| "-".to_string());
+                result_tile = result_tile.child(
+                    carbon_tile(TileLayer::Layer02, theme)
+                        .min_w_0()
+                        .gap(CarbonSpacing::px(CarbonSpacing::SP_02))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
+                                .child(
+                                    div()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_size(CarbonTypography::BODY_01.font_size_px())
+                                        .line_height(CarbonTypography::BODY_01.line_height_px())
+                                        .text_color(c.text_primary)
+                                        .child("出区プレビュー"),
+                                )
+                                .child(carbon_tag("出区時刻生成あり", TagKind::Green, theme)),
+                        )
+                        .child(info_row(
+                            "出庫時刻:",
+                            outbound_preview.outbound_time.clone(),
+                            theme,
+                        ))
+                        .child(info_row(
+                            "初発（始発駅発）:",
+                            outbound_preview.first_departure.clone(),
+                            theme,
+                        ))
+                        .child(info_row(
+                            "所要時間:",
+                            format!(
+                                "{}（始発駅停車: {first_dwell}）",
+                                outbound_preview.duration_label
+                            ),
+                            theme,
+                        )),
+                );
+            }
+
             let column_header = div()
                 .flex()
                 .flex_row()
@@ -3321,7 +4278,7 @@ impl MtrApp {
                 )
                 .child(
                     div()
-                        .w(px(156.0))
+                        .w(px(144.0))
                         .flex_shrink_0()
                         .text_size(CarbonTypography::LABEL_01.font_size_px())
                         .line_height(CarbonTypography::LABEL_01.line_height_px())
@@ -3330,12 +4287,21 @@ impl MtrApp {
                 )
                 .child(
                     div()
-                        .w(px(156.0))
+                        .w(px(144.0))
                         .flex_shrink_0()
                         .text_size(CarbonTypography::LABEL_01.font_size_px())
                         .line_height(CarbonTypography::LABEL_01.line_height_px())
                         .text_color(c.text_secondary)
                         .child("生成着発"),
+                )
+                .child(
+                    div()
+                        .w(px(88.0))
+                        .flex_shrink_0()
+                        .text_size(CarbonTypography::LABEL_01.font_size_px())
+                        .line_height(CarbonTypography::LABEL_01.line_height_px())
+                        .text_color(c.text_secondary)
+                        .child("番線"),
                 )
                 .child(
                     div()
@@ -3370,6 +4336,12 @@ impl MtrApp {
                             stop.rounded_arrival.as_deref(),
                             stop.rounded_departure.as_deref(),
                         );
+                        let platform = stop
+                            .updated_platform
+                            .as_deref()
+                            .filter(|name| !name.is_empty())
+                            .unwrap_or("保持")
+                            .to_string();
                         let dwell = format_dwell_seconds(stop.dwell_millis);
 
                         div()
@@ -3397,7 +4369,7 @@ impl MtrApp {
                             )
                             .child(
                                 div()
-                                    .w(px(156.0))
+                                    .w(px(144.0))
                                     .flex_shrink_0()
                                     .min_w_0()
                                     .overflow_hidden()
@@ -3410,7 +4382,7 @@ impl MtrApp {
                             )
                             .child(
                                 div()
-                                    .w(px(156.0))
+                                    .w(px(144.0))
                                     .flex_shrink_0()
                                     .min_w_0()
                                     .overflow_hidden()
@@ -3421,6 +4393,23 @@ impl MtrApp {
                                     .line_height(CarbonTypography::BODY_COMPACT_01.line_height_px())
                                     .text_color(c.text_primary)
                                     .child(generated),
+                            )
+                            .child(
+                                div()
+                                    .w(px(88.0))
+                                    .flex_shrink_0()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(CarbonTypography::BODY_COMPACT_01.font_size_px())
+                                    .line_height(CarbonTypography::BODY_COMPACT_01.line_height_px())
+                                    .text_color(if stop.updated_platform.is_some() {
+                                        c.text_primary
+                                    } else {
+                                        c.text_secondary
+                                    })
+                                    .child(platform),
                             )
                             .child(
                                 div()
@@ -3466,6 +4455,9 @@ impl MtrApp {
             .flex_col()
             .gap(CarbonSpacing::px(CarbonSpacing::SP_05))
             .child(action_tile)
+            .child(precision_tile)
+            .child(operation_tile)
+            .child(outbound_tile)
             .child(result_tile)
     }
 
@@ -3538,7 +4530,21 @@ impl MtrApp {
                                     .child(carbon_tag(save_tag_label, save_tag_kind, theme)),
                             )
                             .child(info_row("プレビュー ID:", preview.id.0.clone(), theme))
-                            .child(info_row("元 OuDia パス:", oudia_path_display, theme)),
+                            .child(info_row("元 OuDia パス:", oudia_path_display, theme))
+                            .child(info_row(
+                                "Operation 方針:",
+                                operation_policy_label(self.state.operation_policy),
+                                theme,
+                            ))
+                            .child(info_row(
+                                "出区生成:",
+                                if preview.outbound.is_some() {
+                                    "有効（出区時刻を含める）"
+                                } else {
+                                    "無効"
+                                },
+                                theme,
+                            )),
                     )
                     .child(carbon_button(
                         "select-save-path",
@@ -5504,5 +6510,177 @@ mod tests {
         assert_eq!(issues.len(), 2);
         assert!(issues.iter().any(|issue| issue.contains("未割当")));
         assert!(issues.iter().any(|issue| issue.contains("重複割当")));
+    }
+
+    fn dummy_outbound_status(valid: bool, source: OutboundRuntimeSource) -> OutboundStatusDto {
+        use mtr_oudia_application::OutboundRuntimeSetting;
+        use mtr_oudia_domain::OutboundRuntime;
+        OutboundStatusDto {
+            setting: Some(OutboundRuntimeSetting {
+                runtime_basis: Default::default(),
+                dimension: 0,
+                route_id: "route-0".to_string(),
+                first_station_id: "st-0".to_string(),
+                first_platform_name: "1番線".to_string(),
+                runtime: OutboundRuntime::from_seconds(15).expect("valid outbound runtime"),
+                measured_at: 1_700_000_000_000,
+                source,
+            }),
+            valid,
+            message: (!valid).then(|| "再測定が必要です".to_string()),
+            duration_label: "15秒（0分15秒）".to_string(),
+            first_station_name: "東京".to_string(),
+            first_platform_name: "1番線".to_string(),
+        }
+    }
+
+    #[test]
+    fn operation_policy_and_generate_outbound_toggle_clear_downstream() {
+        let mut state = MtrShellState::new(Ok(()));
+        assert_eq!(state.operation_policy, OperationPolicy::Preserve);
+        assert!(!state.generate_outbound);
+
+        state.apply_preview_result(Ok(dummy_preview("preview-1", 3, false, true, Vec::new())));
+        state.apply_save_result(Ok(dummy_save_receipt("/tmp/out.oud2", 1024, "sha-initial")));
+
+        // 同一 OperationPolicy の再選択は no-op として下流を保持する。
+        assert!(!state.set_operation_policy(OperationPolicy::Preserve));
+        assert!(state.preview.is_some());
+        assert!(state.save_receipt.is_some());
+
+        // OperationPolicy を切り替えると Step 4 プレビューと Step 5 save_receipt がクリアされる。
+        assert!(state.set_operation_policy(OperationPolicy::RemoveTargetTrain));
+        assert_eq!(state.operation_policy, OperationPolicy::RemoveTargetTrain);
+        assert!(state.preview.is_none());
+        assert!(state.save_receipt.is_none());
+
+        // 再度プレビュー・保存済み状態を作り、generate_outbound のトグルを検証する。
+        state.apply_preview_result(Ok(dummy_preview("preview-2", 3, false, true, Vec::new())));
+        state.apply_save_result(Ok(dummy_save_receipt("/tmp/out.oud2", 1024, "sha-2")));
+
+        // 同一値の指定は no-op。
+        assert!(!state.set_generate_outbound(false));
+        assert!(state.preview.is_some());
+        assert!(state.save_receipt.is_some());
+
+        // generate_outbound を ON にすると下流がクリアされる。
+        assert!(state.toggle_generate_outbound());
+        assert!(state.generate_outbound);
+        assert!(state.preview.is_none());
+        assert!(state.save_receipt.is_none());
+
+        // 再びプレビュー・保存済み状態を作って OFF にしても下流がクリアされる。
+        state.apply_preview_result(Ok(dummy_preview("preview-3", 3, false, true, Vec::new())));
+        state.apply_save_result(Ok(dummy_save_receipt("/tmp/out.oud2", 1024, "sha-3")));
+        assert!(state.toggle_generate_outbound());
+        assert!(!state.generate_outbound);
+        assert!(state.preview.is_none());
+        assert!(state.save_receipt.is_none());
+    }
+
+    #[test]
+    fn apply_outbound_result_updates_state_clears_downstream_and_maps_notifications() {
+        let mut state = MtrShellState::new(Ok(()));
+        state.apply_preview_result(Ok(dummy_preview("preview-1", 3, false, false, Vec::new())));
+        state.apply_save_result(Ok(dummy_save_receipt("/tmp/out.oud2", 512, "sha-1")));
+        assert!(state.set_generate_outbound(true));
+        state.apply_preview_result(Ok(dummy_preview("preview-2", 3, false, false, Vec::new())));
+        state.apply_save_result(Ok(dummy_save_receipt("/tmp/out.oud2", 512, "sha-2")));
+
+        // 1. 計測中の通知変換と busy 判定
+        let measuring = AppStatus::MeasuringOutbound;
+        assert!(measuring.is_busy());
+        assert!(measuring.is_measuring_outbound());
+        let notif_measuring = status_notification(&measuring);
+        assert_eq!(notif_measuring.0, NotificationKind::Info);
+        assert_eq!(notif_measuring.1, "出庫時分を計測中");
+
+        // 2. 有効な出庫計測結果の適用で preview / save_receipt がクリアされ、Success 通知になる。
+        state.apply_outbound_result(
+            Ok(dummy_outbound_status(true, OutboundRuntimeSource::Measured)),
+            false,
+        );
+        assert!(state.outbound_status.as_ref().is_some_and(|s| s.valid));
+        assert!(state.preview.is_none());
+        assert!(state.save_receipt.is_none());
+        assert!(state.generate_outbound);
+        assert!(!state.status.is_busy());
+        let notif_measured = status_notification(&state.status);
+        assert_eq!(notif_measured.0, NotificationKind::Success);
+        assert_eq!(notif_measured.1, "出庫時分を計測しました");
+        assert!(notif_measured.2.contains("15秒（0分15秒）"));
+
+        // 3. invalid な結果（構成不一致など）の適用時は generate_outbound を自動で OFF にし Warning 通知になる。
+        state.apply_outbound_result(
+            Ok(dummy_outbound_status(false, OutboundRuntimeSource::Manual)),
+            true,
+        );
+        assert!(!state.generate_outbound);
+        let notif_warning = status_notification(&state.status);
+        assert_eq!(notif_warning.0, NotificationKind::Warning);
+        assert_eq!(notif_warning.1, "出庫時分を保存しました（要確認）");
+
+        // 4. 計測エラー時は既存の outbound_status を維持しつつ Error 通知になる。
+        state.apply_outbound_result(
+            Err(BusinessError {
+                kind: BusinessErrorKind::Validation,
+                message: "車庫発はHH:mm:ssで入力してください".to_string(),
+                detail: Some("bad clock".to_string()),
+            }),
+            false,
+        );
+        assert!(state.outbound_status.is_some());
+        assert_eq!(
+            status_notification(&state.status),
+            (
+                NotificationKind::Error,
+                "車庫発はHH:mm:ssで入力してください".to_string(),
+                "bad clock".to_string(),
+            )
+        );
+    }
+
+    #[test]
+    fn precision_train_number_and_policy_helpers_work() {
+        assert_eq!(
+            operation_policy_from_choice("preserve"),
+            Some(OperationPolicy::Preserve)
+        );
+        assert_eq!(
+            operation_policy_from_choice("remove_target_train"),
+            Some(OperationPolicy::RemoveTargetTrain)
+        );
+        assert_eq!(operation_policy_from_choice("unknown"), None);
+        assert_eq!(
+            operation_policy_label(OperationPolicy::Preserve),
+            "元のまま保持 (Preserve)"
+        );
+        assert_eq!(
+            operation_policy_label(OperationPolicy::RemoveTargetTrain),
+            "対象列車から削除 (RemoveTargetTrain)"
+        );
+
+        assert_eq!(parse_manual_outbound_seconds("13.5").unwrap(), 13.5);
+        assert_eq!(parse_manual_outbound_seconds(" 0 ").unwrap(), 0.0);
+        assert!(parse_manual_outbound_seconds("").is_err());
+        assert!(parse_manual_outbound_seconds("-1").is_err());
+        assert!(parse_manual_outbound_seconds("NaN").is_err());
+        assert!(parse_manual_outbound_seconds("abc").is_err());
+
+        let mut state = MtrShellState::new(Ok(()));
+        state.apply_candidates_result_with_train_number(
+            Some("001M".to_string()),
+            Ok(vec![dummy_candidate(
+                "cand-1",
+                0,
+                0,
+                "PrimaryExact",
+                true,
+                2,
+            )]),
+        );
+        assert_eq!(state.searched_train_number.as_deref(), Some("001M"));
+        state.clear_candidate_selection();
+        assert!(state.searched_train_number.is_none());
     }
 }
