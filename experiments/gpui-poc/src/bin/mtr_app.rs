@@ -9,7 +9,9 @@ use gpui::{
     Render, Rgba, ScrollHandle, ScrollWheelEvent, SharedString, Styled, Subscription, Window,
     WindowAppearance, WindowBounds, WindowOptions, div, prelude::*, px, size,
 };
-use gpui_poc::backend::{AppBackend, format_business_error};
+use gpui_poc::backend::{
+    AppBackend, RefreshSnapshotOutcome, format_business_error, snapshot_routes_changed,
+};
 use gpui_poc::carbon::{
     ButtonKind, CarbonSpacing, CarbonTheme, CarbonThemeKind, CarbonTypography, NotificationKind,
     TagKind, TileLayer, carbon_button, carbon_inline_notification, carbon_tag, carbon_tile,
@@ -138,6 +140,15 @@ pub enum AppStatus {
         title: String,
         detail: String,
     },
+    RefreshingCache {
+        endpoint: String,
+        dimension: u32,
+    },
+    RefreshUpdated {
+        route_count: usize,
+        stop_count: usize,
+    },
+    RefreshUnchanged,
     InspectingOudia {
         path: String,
     },
@@ -187,6 +198,7 @@ impl AppStatus {
             self,
             Self::Detecting
                 | Self::Fetching { .. }
+                | Self::RefreshingCache { .. }
                 | Self::InspectingOudia { .. }
                 | Self::FindingCandidates
                 | Self::Previewing
@@ -200,6 +212,10 @@ impl AppStatus {
 
     pub fn is_fetching(&self) -> bool {
         matches!(self, Self::Fetching { .. })
+    }
+
+    pub fn is_refreshing(&self) -> bool {
+        matches!(self, Self::RefreshingCache { .. })
     }
 
     pub fn is_inspecting(&self) -> bool {
@@ -272,6 +288,30 @@ pub fn status_notification(status: &AppStatus) -> (NotificationKind, String, Str
         AppStatus::FetchError { title, detail } => {
             (NotificationKind::Error, title.clone(), detail.clone())
         }
+        AppStatus::RefreshingCache {
+            endpoint,
+            dimension,
+        } => (
+            NotificationKind::Info,
+            "キャッシュ待機中".to_string(),
+            format!(
+                "{endpoint} (dimension={dimension}) の MTR API キャッシュ更新を待っています（最大 30 秒）..."
+            ),
+        ),
+        AppStatus::RefreshUpdated {
+            route_count,
+            stop_count,
+        } => (
+            NotificationKind::Success,
+            "更新完了".to_string(),
+            format!("駅・路線データの変化を検出し、{route_count} 路線 / {stop_count} 駅に更新しました"),
+        ),
+        AppStatus::RefreshUnchanged => (
+            NotificationKind::Info,
+            "変化なし（キャッシュ未更新）".to_string(),
+            "最大 30 秒待機しましたが駅・路線データに変化はありませんでした。既存の取得結果と作業状態を維持しています。"
+                .to_string(),
+        ),
         AppStatus::InspectingOudia { path } => (
             NotificationKind::Info,
             "解析中".to_string(),
@@ -428,6 +468,14 @@ fn fetch_button_label(fetching: bool) -> &'static str {
         "取得中..."
     } else {
         "スナップショット取得"
+    }
+}
+
+fn refresh_button_label(refreshing: bool) -> &'static str {
+    if refreshing {
+        "キャッシュ待機中..."
+    } else {
+        "キャッシュ待機して再取得"
     }
 }
 
@@ -745,6 +793,34 @@ impl MtrShellState {
         }
     }
 
+    fn apply_refresh_snapshot_result(
+        &mut self,
+        dimension: u32,
+        result: Result<RefreshSnapshotOutcome, BusinessError>,
+    ) {
+        match result {
+            Ok(RefreshSnapshotOutcome::Updated(dto)) => {
+                // 本セッション側は commit 時点で invalidate 済みのため、UI 側も必ず同期して下流をクリアする。
+                let route_count = dto.routes.len();
+                let stop_count: usize = dto.routes.iter().map(|route| route.station_count).sum();
+                self.dimension = dimension;
+                self.snapshot = Some(dto);
+                self.clear_step3_for_snapshot_change();
+                self.status = AppStatus::RefreshUpdated {
+                    route_count,
+                    stop_count,
+                };
+            }
+            Ok(RefreshSnapshotOutcome::Unchanged) => {
+                self.status = AppStatus::RefreshUnchanged;
+            }
+            Err(err) => {
+                let (title, detail) = format_business_error(&err);
+                self.status = AppStatus::FetchError { title, detail };
+            }
+        }
+    }
+
     fn apply_inspection_result(
         &mut self,
         path: PathBuf,
@@ -1006,6 +1082,65 @@ impl MtrApp {
                     Err(_) => {
                         this.state.status = AppStatus::FetchError {
                             title: "スナップショット取得が中断されました".to_string(),
+                            detail: "バックグラウンド処理との通信が終了しました。".to_string(),
+                        };
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn start_refresh_snapshot(&mut self, cx: &mut Context<Self>) {
+        if self.state.status.is_busy() || self.state.status.is_init_failed() {
+            return;
+        }
+        let Some(previous) = self.state.snapshot.clone() else {
+            return;
+        };
+        let Some(endpoint_str) = self.state.selected_endpoint.clone() else {
+            self.state.status = AppStatus::FetchError {
+                title: "接続先が未選択です".to_string(),
+                detail: "先に「自動検出」を実行して MTR 接続先を選択してください。".to_string(),
+            };
+            cx.notify();
+            return;
+        };
+
+        let endpoint = match MtrEndpoint::parse(&endpoint_str) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                self.state.status = AppStatus::FetchError {
+                    title: "接続先 URL が不正です".to_string(),
+                    detail: format!("{endpoint_str}: {err}"),
+                };
+                cx.notify();
+                return;
+            }
+        };
+
+        let (Some(backend), Some(session_id)) = (&self.backend, self.session_id.clone()) else {
+            return;
+        };
+
+        let dimension = self.state.dimension;
+        self.state.status = AppStatus::RefreshingCache {
+            endpoint: endpoint_str,
+            dimension,
+        };
+        cx.notify();
+
+        let rx = backend.refresh_mtr_snapshot(session_id, endpoint, dimension, previous);
+        cx.spawn(async move |this, cx| {
+            let received = rx.await;
+            this.update(cx, |this, cx| {
+                match received {
+                    Ok(result) => this.state.apply_refresh_snapshot_result(dimension, result),
+                    Err(_) => {
+                        this.state.status = AppStatus::FetchError {
+                            title: "キャッシュ待機再取得が中断されました".to_string(),
                             detail: "バックグラウンド処理との通信が終了しました。".to_string(),
                         };
                     }
@@ -1417,6 +1552,8 @@ impl MtrApp {
         let disabled = busy || self.state.status.is_init_failed();
         let detecting = self.state.status.is_detecting();
         let fetching = self.state.status.is_fetching();
+        let refreshing = self.state.status.is_refreshing();
+        let refresh_disabled = disabled || self.state.snapshot.is_none();
 
         let endpoint_display = self
             .state
@@ -1437,6 +1574,7 @@ impl MtrApp {
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
                     .gap(CarbonSpacing::px(CarbonSpacing::SP_04))
@@ -1480,8 +1618,8 @@ impl MtrApp {
                         div()
                             .flex()
                             .flex_row()
+                            .flex_wrap()
                             .items_center()
-                            .flex_shrink_0()
                             .gap(CarbonSpacing::px(CarbonSpacing::SP_03))
                             .child(carbon_button(
                                 "detect-mtr",
@@ -1502,7 +1640,26 @@ impl MtrApp {
                                 cx.listener(|this, _: &ClickEvent, _window, cx| {
                                     this.start_fetch(cx);
                                 }),
+                            ))
+                            .child(carbon_button(
+                                "refresh-snapshot",
+                                refresh_button_label(refreshing),
+                                ButtonKind::Secondary,
+                                refresh_disabled,
+                                theme,
+                                cx.listener(|this, _: &ClickEvent, _window, cx| {
+                                    this.start_refresh_snapshot(cx);
+                                }),
                             )),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(CarbonTypography::LABEL_01.font_size_px())
+                    .line_height(CarbonTypography::LABEL_01.line_height_px())
+                    .text_color(c.text_secondary)
+                    .child(
+                        "MTR API は駅・路線情報を最大 30 秒キャッシュします。Minecraft 側で路線や駅を変更した直後に反映されない場合は「キャッシュ待機して再取得」を使ってください。",
                     ),
             );
 
@@ -1627,6 +1784,8 @@ impl MtrApp {
                 .text_color(c.text_secondary)
                 .child(if fetching {
                     "路線データを取得しています..."
+                } else if refreshing {
+                    "MTR API キャッシュの更新を待機しています..."
                 } else if detecting {
                     "接続先を自動検出しています..."
                 } else if self.state.snapshot.is_some() {
@@ -4303,5 +4462,277 @@ mod tests {
         state.set_os_dark(false);
         state.set_theme_preference(ThemePreference::System);
         assert_eq!(state.theme.kind, CarbonThemeKind::Gray10);
+    }
+
+    fn dummy_detailed_snapshot(
+        routes: Vec<(&str, &str, Vec<(&str, &str, i64, Option<i64>)>)>,
+        api_current_time_millis: i64,
+    ) -> SnapshotDto {
+        use mtr_oudia_application::RouteStationDto;
+        SnapshotDto {
+            routes: routes
+                .into_iter()
+                .map(|(id, name, stations)| {
+                    let station_count = stations.len();
+                    let stations = stations
+                        .into_iter()
+                        .map(
+                            |(station_name, platform_name, dwell_millis, run_millis_to_next)| {
+                                RouteStationDto {
+                                    station_name: station_name.to_string(),
+                                    platform_name: platform_name.to_string(),
+                                    dwell_millis,
+                                    run_millis_to_next,
+                                }
+                            },
+                        )
+                        .collect();
+                    RouteDto {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        stations,
+                        station_count,
+                        total_run_millis: 120_000,
+                        total_dwell_millis: 15_000,
+                    }
+                })
+                .collect(),
+            dimensions: Vec::new(),
+            api_current_time_millis,
+        }
+    }
+
+    #[test]
+    fn snapshot_routes_changed_detects_route_and_station_differences() {
+        let base = dummy_detailed_snapshot(
+            vec![(
+                "r1",
+                "山手線",
+                vec![
+                    ("東京", "1番線", 15_000, Some(120_000)),
+                    ("神田", "2番線", 10_000, None),
+                ],
+            )],
+            1_000,
+        );
+
+        // api_current_time_millis のみが異なる同一データは false
+        let same_routes_later = dummy_detailed_snapshot(
+            vec![(
+                "r1",
+                "山手線",
+                vec![
+                    ("東京", "1番線", 15_000, Some(120_000)),
+                    ("神田", "2番線", 10_000, None),
+                ],
+            )],
+            99_999,
+        );
+        assert!(!snapshot_routes_changed(&base, &same_routes_later));
+
+        // 路線数の変化で true
+        let added_route = dummy_detailed_snapshot(
+            vec![
+                (
+                    "r1",
+                    "山手線",
+                    vec![
+                        ("東京", "1番線", 15_000, Some(120_000)),
+                        ("神田", "2番線", 10_000, None),
+                    ],
+                ),
+                ("r2", "京浜東北線", vec![("東京", "3番線", 10_000, None)]),
+            ],
+            2_000,
+        );
+        assert!(snapshot_routes_changed(&base, &added_route));
+
+        // 路線名の変化で true
+        let renamed_route = dummy_detailed_snapshot(
+            vec![(
+                "r1",
+                "山手線（内回り）",
+                vec![
+                    ("東京", "1番線", 15_000, Some(120_000)),
+                    ("神田", "2番線", 10_000, None),
+                ],
+            )],
+            2_000,
+        );
+        assert!(snapshot_routes_changed(&base, &renamed_route));
+
+        // 駅構成（駅名・ホーム・駅数・時分）の変化で true
+        let changed_station = dummy_detailed_snapshot(
+            vec![(
+                "r1",
+                "山手線",
+                vec![
+                    ("東京", "1番線", 15_000, Some(120_000)),
+                    ("秋葉原", "2番線", 10_000, None),
+                ],
+            )],
+            2_000,
+        );
+        assert!(snapshot_routes_changed(&base, &changed_station));
+
+        let changed_station_count = dummy_detailed_snapshot(
+            vec![(
+                "r1",
+                "山手線",
+                vec![
+                    ("東京", "1番線", 15_000, Some(120_000)),
+                    ("神田", "2番線", 10_000, Some(90_000)),
+                    ("秋葉原", "1番線", 10_000, None),
+                ],
+            )],
+            2_000,
+        );
+        assert!(snapshot_routes_changed(&base, &changed_station_count));
+    }
+
+    #[test]
+    fn apply_refresh_snapshot_result_preserves_downstream_when_unchanged_and_clears_when_updated() {
+        let mut state = MtrShellState::new(Ok(()));
+        state.candidates = vec!["http://127.0.0.1:49182/".to_string()];
+        assert!(state.select_endpoint("http://127.0.0.1:49182/".to_string()));
+        let initial_snapshot = dummy_detailed_snapshot(
+            vec![(
+                "r1",
+                "山手線",
+                vec![
+                    ("東京", "1", 10_000, Some(120_000)),
+                    ("神田", "2", 10_000, None),
+                ],
+            )],
+            1_000,
+        );
+        state.apply_snapshot_result(0, Ok(initial_snapshot));
+        state.apply_inspection_result(
+            PathBuf::from("/tmp/yamanote.oud2"),
+            Ok(dummy_inspection("OuDiaSecond.1.04", Some("山手線"), 30)),
+        );
+        assert!(state.select_route("r1".to_string()));
+        assert!(state.select_diagram_index(Some(1)));
+        assert!(state.select_train_type(Some(0)));
+        state.apply_candidates_result(Ok(vec![dummy_candidate(
+            "cand-1",
+            1,
+            0,
+            "PrimaryExact",
+            true,
+            2,
+        )]));
+        state.apply_preview_result(Ok(dummy_preview("preview-1", 2, false, false, Vec::new())));
+        state.apply_save_result(Ok(dummy_save_receipt(
+            "/tmp/yamanote_converted.oud2",
+            2048,
+            "sha-1",
+        )));
+
+        // 1. 変化なし適用時は既存スナップショットおよび Step 3/4/5 の状態がすべて維持される
+        state.apply_refresh_snapshot_result(0, Ok(RefreshSnapshotOutcome::Unchanged));
+        assert_eq!(state.status, AppStatus::RefreshUnchanged);
+        assert_eq!(
+            state.snapshot.as_ref().map(|s| s.api_current_time_millis),
+            Some(1_000)
+        );
+        assert_eq!(state.selected_route_id.as_deref(), Some("r1"));
+        assert_eq!(state.selected_diagram_index, Some(1));
+        assert_eq!(state.selected_train_type, Some(0));
+        assert_eq!(state.route_candidates.len(), 1);
+        assert_eq!(
+            state.selected_candidate_id,
+            Some(CandidateId("cand-1".to_string()))
+        );
+        assert!(state.preview.is_some());
+        assert!(state.save_receipt.is_some());
+
+        // 2. エラー時も既存スナップショットおよび Step 3/4/5 の状態は維持される
+        state.apply_refresh_snapshot_result(
+            0,
+            Err(BusinessError {
+                kind: BusinessErrorKind::Connection,
+                message: "MTR API へ接続できません".to_string(),
+                detail: None,
+            }),
+        );
+        assert!(matches!(state.status, AppStatus::FetchError { .. }));
+        assert_eq!(state.selected_route_id.as_deref(), Some("r1"));
+        assert!(state.preview.is_some());
+        assert!(state.save_receipt.is_some());
+
+        // 3. 変化ありの更新時は snapshot を更新し、Step 3〜5 の下流状態をクリアする
+        let updated_snapshot = dummy_detailed_snapshot(
+            vec![(
+                "r1",
+                "山手線（外回り）",
+                vec![
+                    ("東京", "1", 10_000, Some(120_000)),
+                    ("神田", "2", 10_000, Some(90_000)),
+                    ("秋葉原", "1", 10_000, None),
+                ],
+            )],
+            32_000,
+        );
+        state.apply_refresh_snapshot_result(
+            0,
+            Ok(RefreshSnapshotOutcome::Updated(updated_snapshot)),
+        );
+        assert_eq!(
+            state.status,
+            AppStatus::RefreshUpdated {
+                route_count: 1,
+                stop_count: 3,
+            }
+        );
+        assert_eq!(
+            state.snapshot.as_ref().map(|s| s.routes[0].name.as_str()),
+            Some("山手線（外回り）")
+        );
+        assert!(state.selected_route_id.is_none());
+        assert!(state.route_candidates.is_empty());
+        assert!(state.selected_candidate_id.is_none());
+        assert!(state.preview.is_none());
+        assert!(state.save_receipt.is_none());
+        assert_eq!(state.selected_diagram_index, Some(1));
+        assert_eq!(state.selected_train_type, Some(0));
+    }
+
+    #[test]
+    fn status_notification_and_busy_cover_refresh_statuses() {
+        let refreshing = AppStatus::RefreshingCache {
+            endpoint: "http://127.0.0.1:49182/".to_string(),
+            dimension: 0,
+        };
+        assert!(refreshing.is_busy());
+        assert!(refreshing.is_refreshing());
+        assert_eq!(refresh_button_label(true), "キャッシュ待機中...");
+        assert_eq!(refresh_button_label(false), "キャッシュ待機して再取得");
+        let notif_refreshing = status_notification(&refreshing);
+        assert_eq!(notif_refreshing.0, NotificationKind::Info);
+        assert_eq!(notif_refreshing.1, "キャッシュ待機中");
+        assert!(notif_refreshing.2.contains("最大 30 秒"));
+
+        let updated = AppStatus::RefreshUpdated {
+            route_count: 2,
+            stop_count: 18,
+        };
+        assert!(!updated.is_busy());
+        assert!(!updated.is_refreshing());
+        assert_eq!(
+            status_notification(&updated),
+            (
+                NotificationKind::Success,
+                "更新完了".to_string(),
+                "駅・路線データの変化を検出し、2 路線 / 18 駅に更新しました".to_string(),
+            )
+        );
+
+        let unchanged = AppStatus::RefreshUnchanged;
+        assert!(!unchanged.is_busy());
+        assert!(!unchanged.is_refreshing());
+        let notif_unchanged = status_notification(&unchanged);
+        assert_eq!(notif_unchanged.0, NotificationKind::Info);
+        assert_eq!(notif_unchanged.1, "変化なし（キャッシュ未更新）");
     }
 }

@@ -3,7 +3,9 @@
 //! `reqwest` ベースの通信が tokio リアクタを必要とするため、専用の常駐 current-thread
 //! tokio スレッドで `ConversionService` を保持・実行し、結果を `oneshot::Receiver` で返す。
 
-use std::{ffi::OsString, path::PathBuf, sync::Arc, thread::JoinHandle};
+use std::{
+    ffi::OsString, future::Future, path::PathBuf, sync::Arc, thread::JoinHandle, time::Duration,
+};
 
 use futures::{
     FutureExt, StreamExt,
@@ -14,7 +16,7 @@ use futures::{
 use mtr_oudia_application::{
     BusinessError, CandidateId, ConversionService, ConversionSessionStore, EndpointDto,
     InspectionDto, ManualMappingInput, MtrEndpoint, PreviewDto, PreviewId, RouteCandidateDto,
-    SaveReceipt, SessionId, SnapshotDto,
+    RouteDto, RouteStationDto, SaveReceipt, SessionId, SnapshotDto,
 };
 use mtr_oudia_infrastructure::{
     FileMinecraftLogProvider, FileOudiaRepository, JsonSettingsRepository, ReqwestMtrApiClient,
@@ -96,6 +98,51 @@ pub fn format_business_error(err: &BusinessError) -> (String, String) {
     (err.message.clone(), err.detail.clone().unwrap_or_default())
 }
 
+/// MTR API キャッシュ待機再取得のポーリング間隔。
+pub const REFRESH_CACHE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// MTR API キャッシュ待機再取得の最大待機時間（30 秒キャッシュ + 境界余裕 1 秒）。
+pub const REFRESH_CACHE_MAX_WAIT: Duration = Duration::from_secs(31);
+
+/// キャッシュ待機再取得の結果。
+#[derive(Debug, Clone)]
+pub enum RefreshSnapshotOutcome {
+    /// 駅・路線データに変化があり、セッションとスナップショットを更新した。
+    Updated(SnapshotDto),
+    /// 最大待機時間内に駅・路線データの変化がなかった（既存セッション・画面状態を維持）。
+    Unchanged,
+}
+
+fn route_station_eq(a: &RouteStationDto, b: &RouteStationDto) -> bool {
+    a.station_name == b.station_name
+        && a.platform_name == b.platform_name
+        && a.dwell_millis == b.dwell_millis
+        && a.run_millis_to_next == b.run_millis_to_next
+}
+
+fn route_eq(a: &RouteDto, b: &RouteDto) -> bool {
+    a.id == b.id
+        && a.name == b.name
+        && a.station_count == b.station_count
+        && a.total_run_millis == b.total_run_millis
+        && a.total_dwell_millis == b.total_dwell_millis
+        && a.stations.len() == b.stations.len()
+        && a.stations
+            .iter()
+            .zip(b.stations.iter())
+            .all(|(sa, sb)| route_station_eq(sa, sb))
+}
+
+/// `api_current_time_millis` を除外し、駅・路線データ（および dimensions）に変化があるかを判定する。
+pub fn snapshot_routes_changed(old: &SnapshotDto, new: &SnapshotDto) -> bool {
+    if old.dimensions != new.dimensions || old.routes.len() != new.routes.len() {
+        return true;
+    }
+    !old.routes
+        .iter()
+        .zip(new.routes.iter())
+        .all(|(a, b)| route_eq(a, b))
+}
+
 enum BackendCommand {
     DetectMtrEndpoint {
         session_id: SessionId,
@@ -106,6 +153,13 @@ enum BackendCommand {
         endpoint: MtrEndpoint,
         dimension: u32,
         reply: oneshot::Sender<Result<SnapshotDto, BusinessError>>,
+    },
+    RefreshMtrSnapshot {
+        session_id: SessionId,
+        endpoint: MtrEndpoint,
+        dimension: u32,
+        previous: SnapshotDto,
+        reply: oneshot::Sender<Result<RefreshSnapshotOutcome, BusinessError>>,
     },
     InspectOudia {
         session_id: SessionId,
@@ -181,7 +235,7 @@ impl AppBackend {
             .name("gpui-backend-tokio".into())
             .spawn(move || {
                 let service = ConversionService::new(
-                    worker_store,
+                    worker_store.clone(),
                     &ports,
                     &client,
                     &repository,
@@ -189,7 +243,7 @@ impl AppBackend {
                     &saver,
                 )
                 .with_minecraft_log(&minecraft_log);
-                run_worker_loop(runtime, &service, rx);
+                run_worker_loop(runtime, &service, worker_store, rx);
             })
             .map_err(|error| error.to_string())?;
 
@@ -226,6 +280,23 @@ impl AppBackend {
             session_id,
             endpoint,
             dimension,
+            reply,
+        })
+    }
+
+    /// 既存の `previous` と駅・路線データを比較しながら最大 30 秒間ポーリングし、変化時のみセッションを更新する。
+    pub fn refresh_mtr_snapshot(
+        &self,
+        session_id: SessionId,
+        endpoint: MtrEndpoint,
+        dimension: u32,
+        previous: SnapshotDto,
+    ) -> oneshot::Receiver<Result<RefreshSnapshotOutcome, BusinessError>> {
+        self.dispatch(|reply| BackendCommand::RefreshMtrSnapshot {
+            session_id,
+            endpoint,
+            dimension,
+            previous,
             reply,
         })
     }
@@ -309,9 +380,58 @@ impl AppBackend {
     }
 }
 
+struct ProbeSessionGuard {
+    store: ConversionSessionStore,
+    session_id: SessionId,
+}
+
+impl Drop for ProbeSessionGuard {
+    fn drop(&mut self) {
+        self.store.remove(&self.session_id);
+    }
+}
+
+/// キャッシュ更新を待つ間は仮セッションでポーリングし、変化を検出したときのみ本セッションへ反映する。
+async fn poll_snapshot_until_changed<F, Fut, S, SFut>(
+    previous: &SnapshotDto,
+    poll_interval: Duration,
+    max_wait: Duration,
+    mut fetch_probe: F,
+    mut commit_session: S,
+    is_canceled: impl Fn() -> bool,
+) -> Result<RefreshSnapshotOutcome, BusinessError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<SnapshotDto, BusinessError>>,
+    S: FnMut() -> SFut,
+    SFut: Future<Output = Result<SnapshotDto, BusinessError>>,
+{
+    let started_at = tokio::time::Instant::now();
+    loop {
+        if is_canceled() {
+            return Ok(RefreshSnapshotOutcome::Unchanged);
+        }
+        let candidate = fetch_probe().await?;
+        if snapshot_routes_changed(previous, &candidate) {
+            if is_canceled() {
+                return Ok(RefreshSnapshotOutcome::Unchanged);
+            }
+            let committed = commit_session().await?;
+            return Ok(RefreshSnapshotOutcome::Updated(committed));
+        }
+        let elapsed = started_at.elapsed();
+        if elapsed >= max_wait {
+            return Ok(RefreshSnapshotOutcome::Unchanged);
+        }
+        let wait = poll_interval.min(max_wait.saturating_sub(elapsed));
+        tokio::time::sleep(wait).await;
+    }
+}
+
 fn run_worker_loop(
     runtime: tokio::runtime::Runtime,
     service: &Service<'_>,
+    store: ConversionSessionStore,
     mut rx: mpsc::UnboundedReceiver<BackendCommand>,
 ) {
     runtime.block_on(async move {
@@ -352,6 +472,40 @@ fn run_worker_loop(
                             let result = service
                                 .fetch_mtr_snapshot(&session_id, &endpoint, dimension)
                                 .await;
+                            let _ = reply.send(result);
+                        }
+                        .boxed_local(),
+                    );
+                }
+                BackendCommand::RefreshMtrSnapshot {
+                    session_id,
+                    endpoint,
+                    dimension,
+                    previous,
+                    reply,
+                } => {
+                    let store = store.clone();
+                    in_flight.push(
+                        async move {
+                            // 変化がない間は本セッションの下流状態（候補・プレビュー）を無効化しないよう仮セッションで探索する。
+                            let probe_session = store.create("refresh-probe".into());
+                            let _guard = ProbeSessionGuard {
+                                store,
+                                session_id: probe_session.clone(),
+                            };
+                            let probe_ref = &probe_session;
+                            let session_ref = &session_id;
+                            let endpoint_ref = &endpoint;
+                            let reply_ref = &reply;
+                            let result = poll_snapshot_until_changed(
+                                &previous,
+                                REFRESH_CACHE_POLL_INTERVAL,
+                                REFRESH_CACHE_MAX_WAIT,
+                                || service.fetch_mtr_snapshot(probe_ref, endpoint_ref, dimension),
+                                || service.fetch_mtr_snapshot(session_ref, endpoint_ref, dimension),
+                                || reply_ref.is_canceled(),
+                            )
+                            .await;
                             let _ = reply.send(result);
                         }
                         .boxed_local(),
@@ -546,5 +700,134 @@ mod tests {
             format_business_error(&without_detail),
             ("MTR APIへ接続できません".to_string(), String::new())
         );
+    }
+
+    fn test_snapshot(
+        routes: Vec<(&str, &str, Vec<(&str, &str, i64, Option<i64>)>)>,
+        api_current_time_millis: i64,
+    ) -> SnapshotDto {
+        SnapshotDto {
+            routes: routes
+                .into_iter()
+                .map(|(id, name, stations)| {
+                    let station_count = stations.len();
+                    let stations = stations
+                        .into_iter()
+                        .map(
+                            |(station_name, platform_name, dwell_millis, run_millis_to_next)| {
+                                RouteStationDto {
+                                    station_name: station_name.to_string(),
+                                    platform_name: platform_name.to_string(),
+                                    dwell_millis,
+                                    run_millis_to_next,
+                                }
+                            },
+                        )
+                        .collect();
+                    RouteDto {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        stations,
+                        station_count,
+                        total_run_millis: 0,
+                        total_dwell_millis: 0,
+                    }
+                })
+                .collect(),
+            dimensions: Vec::new(),
+            api_current_time_millis,
+        }
+    }
+
+    #[test]
+    fn poll_snapshot_until_changed_commits_only_when_routes_change() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("tokio runtime");
+
+        let previous = test_snapshot(
+            vec![("r1", "山手線", vec![("東京", "1", 10_000, Some(120_000))])],
+            1_000,
+        );
+
+        // 2 回目は同一路線データ（時刻のみ更新）、3 回目で路線名変化 → 更新される。
+        let mut probe_calls = 0usize;
+        let mut commit_calls = 0usize;
+        let updated_outcome = rt
+            .block_on(poll_snapshot_until_changed(
+                &previous,
+                Duration::from_millis(5),
+                Duration::from_millis(200),
+                || {
+                    probe_calls += 1;
+                    let snapshot = if probe_calls < 3 {
+                        test_snapshot(
+                            vec![("r1", "山手線", vec![("東京", "1", 10_000, Some(120_000))])],
+                            1_000 + (probe_calls as i64) * 2_000,
+                        )
+                    } else {
+                        test_snapshot(
+                            vec![(
+                                "r1",
+                                "山手線（外回り）",
+                                vec![("東京", "1", 10_000, Some(120_000))],
+                            )],
+                            9_000,
+                        )
+                    };
+                    async move { Ok(snapshot) }
+                },
+                || {
+                    commit_calls += 1;
+                    let committed = test_snapshot(
+                        vec![(
+                            "r1",
+                            "山手線（外回り）",
+                            vec![("東京", "1", 10_000, Some(120_000))],
+                        )],
+                        9_100,
+                    );
+                    async move { Ok(committed) }
+                },
+                || false,
+            ))
+            .expect("polling should succeed");
+        assert_eq!(probe_calls, 3);
+        assert_eq!(commit_calls, 1);
+        assert!(matches!(
+            updated_outcome,
+            RefreshSnapshotOutcome::Updated(dto) if dto.routes[0].name == "山手線（外回り）"
+        ));
+
+        // 最大待機時間まで変化なしの場合は Unchanged を返し、本セッションはコミットしない。
+        let mut unchanged_probes = 0usize;
+        let mut unchanged_commits = 0usize;
+        let unchanged_outcome = rt
+            .block_on(poll_snapshot_until_changed(
+                &previous,
+                Duration::from_millis(10),
+                Duration::from_millis(35),
+                || {
+                    unchanged_probes += 1;
+                    let snapshot = test_snapshot(
+                        vec![("r1", "山手線", vec![("東京", "1", 10_000, Some(120_000))])],
+                        2_000 + (unchanged_probes as i64) * 1_000,
+                    );
+                    async move { Ok(snapshot) }
+                },
+                || {
+                    unchanged_commits += 1;
+                    async move { unreachable!("commit must not run when unchanged") }
+                },
+                || false,
+            ))
+            .expect("unchanged polling should succeed");
+        assert!(unchanged_probes >= 2);
+        assert_eq!(unchanged_commits, 0);
+        assert!(matches!(
+            unchanged_outcome,
+            RefreshSnapshotOutcome::Unchanged
+        ));
     }
 }
