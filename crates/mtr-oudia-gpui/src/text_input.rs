@@ -673,6 +673,7 @@ impl Render for TextInput {
             .h(self.style.height)
             .w_full()
             .min_w_0()
+            .overflow_hidden()
             .px(self.style.padding_x)
             .py(self.style.padding_y)
             .bg(self.style.bg)
